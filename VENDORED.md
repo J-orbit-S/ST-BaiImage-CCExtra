@@ -106,8 +106,60 @@ CCExtra 采用与上游相同的 `src/autoTag|st|backends|state|api` 目录结�
 | 关口 | 命令 | 当前结果（2026-11-20） |
 |---|---|---|
 | 类型检查 | `npm run typecheck` | 通过，0 error |
-| 测试 | `npm test` | **21 文件 / 350 tests 全过**（334 上游 + 12 Adapter 自测 + 4 黄金哨兵） |
+| 测试 | `npm test` | **24 文件 / 402 tests 全过**（334 上游 + 12 Adapter 自测 + 4 黄金哨兵 + 52 划线模块） |
 | 字节一致 | `BAIBAI_UPSTREAM=<上游路径> npm run verify:upstream` | **39 文件 SHA256 + nai 3 片段 + 10 常量全部 MATCH** |
 
 > 排错分界线：**测试挂 = 行为变了**（先看黄金基准是否该更新）；**SHA 不匹配 = 代码被改或换行被转换**；
 > 两者都绿而线上不对 = 问题在 Adapter 之外（划选取词、UI、出图链路）。
+
+## 自有代码：`src/selection/`（非 vendored，唯一允许写业务逻辑的地方）
+
+划线出图与「整楼出图」的唯一区别是**输入文本**。上游一切照旧，所以这一层只做「DOM 选区 → 原文区间」，
+不复制分析逻辑、不碰出图。四个文件，边界清楚：
+
+| 文件 | 职责 | 是否碰 DOM |
+|---|---|---|
+| `locate.ts` | 三级归一化匹配 + 上下文消歧 + 扩到物理行 | 否（纯函数） |
+| `hash.ts` | 正文指纹（FNV-1a + 长度），CAS 的「C」 | 否 |
+| `capture.ts` | 取 Range、认 `mesid`、拒跨楼、打包快照 | 是（薄） |
+| `segmentPlan.ts` | 切片行号 ⇄ 整楼行号、写回前重定位 | 否（纯函数） |
+
+### 不变量（改这几条之前先想清楚会毁掉什么）
+
+1. **定位宁可失败，绝不猜。** 多命中且上下文分不清时报 `ambiguous` 并中止。
+   猜错的后果是 tag 插到别的段落、图画错场景，用户几乎无法察觉。
+2. **区间必须扩到完整物理行。** 分析链路按物理行切段（`clean.ts` 的 `prepareTargetText`），
+   只选半行会让模型看到半句话；且 `rebase` 的锚是整行文本。
+3. **跨楼不合并。** 首尾 `mesid` 不同一律拒绝，由调用方拆成多次分析。
+4. **切片文本以原文为准，不以 DOM 文本为准。** `capture.text` 永远是 `mes.slice(range)`，
+   `domText` 只用于诊断。渲染会吃掉 markdown、折叠空白，DOM 文本不是真源。
+5. **切片行号不能直接当整楼行号用。** 必须经 `planSelection` 平移。底层原因：`rebase` 的对齐锚是
+   「整行文本相等」，一楼里出现两行相同文本时它会锚到第一处——`segmentPlan.test.ts` 里有一条
+   对照用例专门钉住这个坑。
+6. **捕获后正文被改过就不许直接写。** `planSelection` 先校验指纹，不符判 `stale`；
+   `resolveWriteback` 在指纹不符时回落到 `rebase`（与柏宝绘既有口径一致）。
+
+### 为什么 `segmentPlan.ts` 存在（最容易看不懂的一层）
+
+分析链路被告知的插入行是**切片内**的行号（它只看到切片），但 `injectImageTags` 要的是**整楼**行号。
+换算不能靠 `rebase` 完成，因为 rebase 只看文本不看位置。所以：
+
+```
+capture.range.start ──lineIndexAt──▶ 切片起始绝对行
+                                      ＋ segment.sourceLine = 绝对行
+```
+
+`sliceSegments`（LLM 视角）与 `absoluteSegments`（写回视角）**同下标一一对应**，中间只差一个行号偏移。
+两条路共用同一份清洗结果，避免「给模型看的」和「写回时对齐的」口径漂移。
+
+### 排错入口（划线相关现象 → 先看什么）
+
+| 现象 | 先查 | 命令/字段 |
+|---|---|---|
+| 提示「无法在原文中定位」 | 选区是否只落在渲染插入的内容上（按钮/分隔线） | `captureSelection` 返回 `not-found` |
+| 提示「出现了多次」 | 楼层里有重复句，让用户多划上下文 | 返回 `ambiguous` + `candidates` |
+| 划完提示跨楼 | 用户拖动跨了两个 `.mes` | 返回 `cross-message` + `detail` |
+| tag 插到了句子中间 | 扩行是否生效 | `capture.expanded` / `lineCount` |
+| tag 插到了错的那一段 | 是否走了 `direct` 而非按文本锚定；重复行场景 | `describeCapture()` 的 `method/candidates` |
+| 分析用的文字不是选的文字 | `capture.text` 与 `domText` 的差异 | `describeCapture()` 一行摘要 |
+
