@@ -11,6 +11,7 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "verify:upstream": "node scripts/verify-upstream.mjs",
+    "sync:st": "node scripts/sync-st.mjs",
     "extract:defaults": "node scripts/extract-defaults.mjs",
     "setup": "npm install --legacy-peer-deps --cache ./.npm-cache"
   },

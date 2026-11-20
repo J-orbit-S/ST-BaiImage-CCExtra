@@ -14,7 +14,10 @@
 ## 安装
 
 1. 先装并配置好 [柏宝绘](https://github.com/baibai-git/ST-BaiBai-Image)（0.3.6 为锚点版本）。
-2. 把本仓库整个目录放进 `SillyTavern/data/<user>/extensions/third-party/ST-BaiImage-CCExtra/`。
+2. 把本仓库整个目录放进扩展目录，二者按你的安装方式选一个：
+   - `SillyTavern/public/scripts/extensions/third-party/ST-BaiImage-CCExtra/`（本机就是这个）
+   - `SillyTavern/data/<user>/extensions/third-party/ST-BaiImage-CCExtra/`
+
    仓库里已带构建产物 `dist/index.js`，**不需要自己编译**。
 3. 刷新 SillyTavern。控制台出现 `[CCX] ST-BaiImage-CCExtra 0.1.0 已加载` 即成功。
 
@@ -65,7 +68,26 @@ npm run setup            # 本机 npm 解析 vitest peer 有 bug，必须带 --l
 npm run typecheck
 npm test                 # 26 文件 / 425 tests
 npm run build            # → dist/index.js（单文件）
+npm run sync:st          # 构建产物同步到 SillyTavern 扩展目录
 ```
+
+### 两个路径，一个真源
+
+| 路径 | 角色 |
+|---|---|
+| `G:\插件\ST-BaiImage-CCExtra` | **开发真源**（git 仓库），只在这里改 |
+| `G:\SillyTavern\public\scripts\extensions\third-party\ST-BaiImage-CCExtra` | **安装副本**，SillyTavern 实际加载的，不要手改 |
+
+改完一次代码的固定动作：
+
+```bash
+npm run typecheck && npm test && npm run build && npm run sync:st
+git add -A && git commit -m "..." && git push
+```
+
+> 安装副本是 `git clone`，所以「只更新不开发」时直接 `git -C <副本> pull` 也可以；
+> `sync:st` 用于「改了源码但还没提交」的快速试车。目标目录不是默认位置时：
+> `ST_EXT_DIR="/d/SillyTavern/public/scripts/extensions/third-party" npm run sync:st`。
 
 ```
 src/
@@ -79,6 +101,7 @@ src/
 
 - 逐字复制登记、LOCAL PATCHES、不变量、排错表 → **`VENDORED.md`**
 - 全链路工程方案（含字段级契约、故障树、里程碑） → **`docs/ENGINEERING.md`**
+- **从需求到落地的全流程复盘 + 变更日志 + 改动守则 → `docs/RETROSPECTIVE.md`**
 
 ## 排错
 

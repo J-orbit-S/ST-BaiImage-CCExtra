@@ -540,3 +540,13 @@ npm run build                    dist/index.js 单文件（175 KB / gzip 69 KB�
 | 图插到了句子中间 | 扩行失效 | `runSelection:enter` 的 `expanded` / `lines` |
 | 图插到了别的段落 | 绝对行号换算错 | `runSelection:start` 的 `absoluteStartLine` 与 `describeCapture()` 对照 |
 | 正文没变但卡片显示「待重新生成」 | tag 序列化漂移 | 看 `injectImageTags` 产物是否 `插画不写 <type>`、`size 恒写` |
+
+### 13.6 相邻文档
+
+| 文档 | 用途 |
+|---|---|
+| `docs/RETROSPECTIVE.md` | 从需求到落地的全流程复盘：五问五答、架构取舍的否决理由、13 个坑、变更日志、改动守则（含两个路径的同步流程） |
+| `VENDORED.md` | 逐字复制登记、LOCAL PATCHES、划线模块不变量、排错入口 |
+| `README.md` | 安装与使用 |
+
+本文是「协议契约」，`RETROSPECTIVE.md` 是「决策档案」。**改动流程与版本日志只维护在后者**，避免两处不同步。
