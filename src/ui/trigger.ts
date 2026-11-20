@@ -20,10 +20,10 @@ import { isAiStoryMessage, getContext } from '@/st/context';
 import { cancelSelectionRun, runSelection } from '@/runner/runSelection';
 import { diagnostic } from '@/runner/diagnostic';
 import { notify } from '@/ui/notify';
-import { setBusyInfo } from '@/ui/panel';
+import { setBusyInfo, openPanel } from '@/ui/panel';
 
 const BUTTON_ID = 'ccx-select-trigger';
-const IDLE_TEXT = '划线出图';
+const IDLE_TEXT = '生成 tag';
 /** 忙态不再是「分析中…」这种死字：这个按钮此刻就是取消键。 */
 const CANCEL_TEXT = '✕ 取消分析';
 
@@ -128,6 +128,8 @@ async function trigger(): Promise<void> {
     const outcome = await runSelection(capture);
     // runSelection 取消时只返回状态、不弹提示——不补这一句，用户会以为「点了没反应」
     if (outcome.status === 'aborted') notify('info', '已取消，正文未改动');
+    // 确认式：候选已经放进池子，直接把面板打开让人确认（不然用户不知道下一步在哪）
+    if (outcome.status === 'pending') void openPanel();
   } catch (error) {
     // runSelection 自己把异常转成了 toast；这里只兜住「连 toast 都没来得及」的情况
     console.error('[CCX] 划线出图异常', error);

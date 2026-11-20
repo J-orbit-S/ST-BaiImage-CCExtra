@@ -1,6 +1,6 @@
 {
   "name": "st-baiimage-ccextra",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "description": "ST-BaiImage-CCExtra — 柏宝绘伴生插件（划线出图，分析链路协议级复刻）",

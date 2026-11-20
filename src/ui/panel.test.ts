@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { PREFS_KEY, readPrefs, forgetPrefsCache } from '@/state/prefs';
 import { SETTINGS_KEY } from '@/state/settings';
-import { closePanel, isPanelMounted, openPanel, setBusyInfo } from '@/ui/panel';
+import { CANDIDATES_KEY } from '@/state/candidates';
+import { closePanel, isPanelMounted, openPanel, resetPanelState, setBusyInfo } from '@/ui/panel';
 
 /**
  * 面板跑在柏宝绘的 shadow root 里，Node 没有 DOM，所以这里搭一个刚好够用的假 DOM。
@@ -25,6 +26,7 @@ class FakeElement {
   type = '';
   checked = false;
   disabled = false;
+  value = '';
   tabIndex = 0;
   parentElement: FakeElement | null = null;
   children: FakeElement[] = [];
@@ -83,7 +85,7 @@ class FakeElement {
     this.listeners.set(type, list);
   }
 
-  dispatch(type: string, event: unknown = { target: this, preventDefault() {} }): void {
+  dispatch(type: string, event: unknown = { target: this, preventDefault() {}, stopPropagation() {} }): void {
     for (const listener of this.listeners.get(type) ?? []) listener(event);
   }
 
@@ -122,10 +124,18 @@ class FakeShadow {
 interface Harness {
   shadow: FakeShadow;
   extensionSettings: Record<string, unknown>;
+  chatMetadata: Record<string, unknown>;
 }
 
 /** 装一个「柏宝绘已加载」的宿主：host 有 open shadow，且里面已经有内容（它 mount 过了）。 */
-function install(options: { theme?: string; prefs?: Record<string, unknown> } = {}): Harness {
+function install(
+  options: {
+    theme?: string;
+    prefs?: Record<string, unknown>;
+    candidates?: unknown[];
+    chatId?: string;
+  } = {},
+): Harness {
   const shadow = new FakeShadow();
   // 模拟柏宝绘 mount 时挂进去的 <link>：panel 用 childElementCount>0 判断它已经清空过
   shadow.appendChild(new FakeElement('link'));
@@ -139,6 +149,9 @@ function install(options: { theme?: string; prefs?: Record<string, unknown> } = 
   };
   if (options.prefs) extensionSettings[PREFS_KEY] = options.prefs;
 
+  const chatMetadata: Record<string, unknown> = {};
+  if (options.candidates?.length) chatMetadata[CANDIDATES_KEY] = { v: 1, items: options.candidates };
+
   const doc = {
     getElementById: (id: string) => (id === host.id ? host : null),
     createElement: (tag: string) => new FakeElement(tag),
@@ -148,14 +161,21 @@ function install(options: { theme?: string; prefs?: Record<string, unknown> } = 
     body: new FakeElement('body'),
   };
 
+  const chatId = options.chatId ?? 'chat-panel';
   vi.stubGlobal('document', doc);
   vi.stubGlobal('window', {
     SillyTavern: {
-      getContext: () => ({ extensionSettings, saveSettingsDebounced: () => {} }),
+      getContext: () => ({
+        extensionSettings,
+        chatMetadata,
+        getCurrentChatId: () => chatId,
+        saveMetadataDebounced: () => {},
+        saveSettingsDebounced: () => {},
+      }),
     },
   });
 
-  return { shadow, extensionSettings };
+  return { shadow, extensionSettings, chatMetadata };
 }
 
 function panelRoot(shadow: FakeShadow): FakeElement | null {
@@ -174,6 +194,7 @@ afterEach(() => {
   closePanel();
   // 状态行是模块级的，不清会串到下一条用例（曾出现「没在跑却 had:true」的假象）
   setBusyInfo(null);
+  resetPanelState();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   forgetPrefsCache();
@@ -219,19 +240,40 @@ describe('面板挂载', () => {
 });
 
 describe('开关', () => {
-  it('默认两个都开，且反映到控件上', async () => {
+  it('三个开关的默认状态：自动出图开、需确认关、悬浮球开', async () => {
     const { shadow } = install();
     await openPanel();
     const boxes = checkboxes(shadow);
-    expect(boxes).toHaveLength(2);
-    expect(boxes.every(box => box.checked)).toBe(true);
+    expect(boxes).toHaveLength(3);
+    expect(boxes.map(box => box.checked)).toEqual([true, false, true]);
+  });
+
+  it('自动出图开着时「需确认」置灰，点不动', async () => {
+    const { shadow } = install();
+    await openPanel();
+    const boxes = checkboxes(shadow);
+    expect(boxes[1].disabled).toBe(true);
+
+    // 关掉自动出图 → 需确认解锁
+    boxes[0].checked = false;
+    boxes[0].dispatch('change');
+    expect(boxes[1].disabled).toBe(false);
+  });
+
+  it('需确认开 → 关自动出图后勾上，读回来是确认式', async () => {
+    const { shadow, extensionSettings } = install({ prefs: { autoGenerate: false, showOrb: true } });
+    await openPanel();
+    const boxes = checkboxes(shadow);
+    boxes[1].checked = true;
+    boxes[1].dispatch('change');
+    expect(extensionSettings[PREFS_KEY]).toMatchObject({ autoGenerate: false, confirmTag: true });
   });
 
   it('读回存过的值：关掉自动出图时控件是未勾选', async () => {
     const { shadow } = install({ prefs: { autoGenerate: false, showOrb: true } });
     await openPanel();
     expect(checkboxes(shadow)[0].checked).toBe(false);
-    expect(checkboxes(shadow)[1].checked).toBe(true);
+    expect(checkboxes(shadow)[2].checked).toBe(true);
   });
 
   it('勾选「自动出图」会把偏好写进我们自己的键', async () => {
@@ -250,7 +292,7 @@ describe('开关', () => {
     const { shadow, extensionSettings } = install({ prefs: { autoGenerate: false, showOrb: true } });
     await openPanel();
 
-    const box = checkboxes(shadow)[1];
+    const box = checkboxes(shadow)[2];
     box.checked = false;
     box.dispatch('change');
 
@@ -306,5 +348,115 @@ describe('在途状态行', () => {
     const busyRow = panelRoot(shadow)?.findAll(el => el.className === 'bbi-switch-row')?.at(-1);
     const cancelButton = busyRow?.findAll(el => el.tagName === 'button')[0];
     expect(() => cancelButton?.dispatch('click')).not.toThrow();
+  });
+});
+
+/**
+ * 候选卡片：确认式唯一的交互面。
+ * 它出问题的表现是「点了没反应」或「字改完一刷新就没了」，所以这里锁三件事：
+ * 卡片按池子里的条目长出来、编辑态能改到候选上、删掉之后卡片消失。
+ */
+function candidate(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    imageId: 'plan:0',
+    planId: 'plan',
+    chatId: 'chat-panel',
+    floor: 3,
+    swipeId: 0,
+    segments: [{ segmentId: 's1', text: '她推开门。', before: '', after: '', startLine: 0, endLine: 0 }],
+    index: 0,
+    versions: [
+      {
+        image: {
+          position: 'P1',
+          sourceLine: 0,
+          tag: '1girl, doorway, dim light',
+          nl: '',
+          negative: '',
+          characters: [],
+          size: 'portrait',
+        },
+        changes: [],
+        createdAt: 1,
+      },
+    ],
+    activeVersion: 0,
+    status: 'pending',
+    createdAt: 1,
+    updatedAt: 1,
+    ...overrides,
+  };
+}
+
+function textsIn(shadow: FakeShadow, text: string): FakeElement[] {
+  return panelRoot(shadow)?.findAll(el => el.textContent === text) ?? [];
+}
+
+function buttonsOf(shadow: FakeShadow): string[] {
+  return (panelRoot(shadow)?.findAll(el => el.tagName === 'button') ?? []).map(button => button.textContent);
+}
+
+describe('候选卡片', () => {
+  it('没有候选时是空态，不摆一张空卡', async () => {
+    const { shadow } = install();
+    await openPanel();
+    expect(textsIn(shadow, '待确认')).toHaveLength(1);
+    expect(
+      textsIn(shadow, '没有待确认的画面。划选正文 → 点「生成 tag」，候选会出现在这里。'),
+    ).toHaveLength(1);
+  });
+
+  it('池子里有候选时，卡片长出来：出处、当前提示词、四个动作', async () => {
+    const { shadow } = install({ candidates: [candidate()] });
+    await openPanel();
+
+    expect(textsIn(shadow, '待确认 1').length).toBeGreaterThan(0);
+    expect(textsIn(shadow, '画面 01 · 第 3 楼')).toHaveLength(1);
+    expect(textsIn(shadow, '1girl, doorway, dim light')).toHaveLength(1);
+    expect(buttonsOf(shadow)).toEqual(
+      expect.arrayContaining(['✓ 确认', '⟳ 重 Roll', '✎ 编辑', '✕ 删除']),
+    );
+  });
+
+  it('点「编辑」出现文本框并带当前提示词，改完保存写回候选', async () => {
+    const { shadow, chatMetadata } = install({ candidates: [candidate()] });
+    await openPanel();
+
+    const edit = panelRoot(shadow)?.findAll(el => el.textContent === '✎ 编辑')[0];
+    edit?.dispatch('click');
+
+    const areas = panelRoot(shadow)?.findAll(el => el.tagName === 'textarea') ?? [];
+    expect(areas).toHaveLength(1);
+    expect(areas[0].value).toBe('1girl, doorway, dim light');
+
+    areas[0].value = '1girl, edited tag';
+    areas[0].dispatch('input');
+
+    const save = panelRoot(shadow)?.findAll(el => el.textContent === '保存')[0];
+    save?.dispatch('click');
+
+    const items = (chatMetadata[CANDIDATES_KEY] as { items: Array<{ versions: Array<{ image: { tag: string } }> }> })
+      .items;
+    expect(items[0].versions[0].image.tag).toBe('1girl, edited tag');
+    // 保存的是候选，不是正文：编辑态收起来、文本框消失
+    expect(panelRoot(shadow)?.findAll(el => el.tagName === 'textarea')).toHaveLength(0);
+  });
+
+  it('点「删除」把候选移出池子，卡片跟着消失', async () => {
+    const { shadow, chatMetadata } = install({ candidates: [candidate()] });
+    await openPanel();
+
+    const remove = panelRoot(shadow)?.findAll(el => el.textContent === '✕ 删除')[0];
+    remove?.dispatch('click');
+
+    expect((chatMetadata[CANDIDATES_KEY] as { items: unknown[] }).items).toHaveLength(0);
+    expect(textsIn(shadow, '画面 01 · 第 3 楼')).toHaveLength(0);
+    expect(textsIn(shadow, '待确认')).toHaveLength(1);
+  });
+
+  it('别的聊天的候选不会显示在面板里', async () => {
+    const { shadow } = install({ candidates: [candidate({ chatId: 'another-chat' })] });
+    await openPanel();
+    expect(textsIn(shadow, '画面 01 · 第 3 楼')).toHaveLength(0);
   });
 });

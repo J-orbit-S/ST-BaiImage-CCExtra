@@ -20,6 +20,8 @@ import { bindCharTagSync } from '@/state/charTags';
 import { initGlobalCharTags } from '@/state/globalCharTags';
 import { captureSelection } from '@/selection/capture';
 import { cancelAllSelectionRuns, runSelection } from '@/runner/runSelection';
+import { commitCandidate, rerollCandidate } from '@/runner/commit';
+import { listCandidates } from '@/state/candidates';
 import { diagnostic } from '@/runner/diagnostic';
 import { bindSelectionTrigger } from '@/ui/trigger';
 import { isAutoGenerateEnabled, setAutoGenerate } from '@/ui/autoGenerate';
@@ -75,12 +77,16 @@ function start(): void {
     prefs: readPrefs,
     setPrefs: updatePrefs,
     resetPrefs,
+    // 候选池：控制台里可以直接看/确认/重 Roll（排查确认式时用）
+    candidates: listCandidates,
+    commit: commitCandidate,
+    reroll: rerollCandidate,
     // 自检：面板是否挂上、球在不在
     isPanelMounted,
     isOrbVisible,
   });
 
-  console.log(`[CCX] ST-BaiImage-CCExtra ${VERSION} 已加载：选中正文 → 点「划线出图」`);
+  console.log(`[CCX] ST-BaiImage-CCExtra ${VERSION} 已加载：选中正文 → 点「生成 tag」`);
 }
 
 /**

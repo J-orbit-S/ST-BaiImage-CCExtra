@@ -11,17 +11,28 @@
  * 编译后带 `data-v-*` 属性选择器，我们的节点没有那个属性。所以这四处用内联样式复刻同样的
  * 几何与变量（36px 圆角按钮、14px/16px 内边距），颜色仍走 `--bbi-*` → 主题照样跟随。
  *
+ * 面板里有两块东西：
+ *   ① 本插件自己的开关（自动出图 / 需确认 / 显示悬浮球）；
+ *   ② 待确认的候选画面（volume 2 的确认式）。候选卡片是纯 DOM 现搭，样式全部走 `--bbi-*`。
+ *
  * 代价：面板依赖柏宝绘先加载。没启用时**不做备用样式**（那等于养第二份 CSS 副本，
  * 比依赖更危险），只给一句人话提示。
- *
- * 尺寸也不改它任何文件：`.bbi-window` 的宽高读 CSS 变量，我们在自己根节点上
- * 覆写 `--bbi-win-max-w` 就得到「同款壳、只是窄」。
  */
 
 import { diagnostic } from '@/runner/diagnostic';
+import { commitCandidate, rerollCandidate } from '@/runner/commit';
+import {
+  countPending,
+  editCandidateTag,
+  discardCandidate,
+  listCandidates,
+  onCandidatesChange,
+  type ImageCandidate,
+} from '@/state/candidates';
 import { onPrefsChange, readPrefs, updatePrefs, type Prefs } from '@/state/prefs';
 import { notify } from '@/ui/notify';
 import { readBaibaiTheme } from '@/ui/theme';
+import { getContext } from '@/st/context';
 
 /** 柏宝绘的 shadow host（它自己 `index.ts` 里创建，id 固定）。 */
 const HOST_ID = 'bbi-app-host';
@@ -42,16 +53,29 @@ interface PanelDom {
   root: HTMLDivElement;
   overlay: HTMLDivElement;
   autoInput: HTMLInputElement;
+  confirmInput: HTMLInputElement;
+  confirmRow: HTMLElement;
   orbInput: HTMLInputElement;
   busyRow: HTMLDivElement;
   busyLabel: HTMLSpanElement;
   cancelButton: HTMLButtonElement;
+  candidatesSection: HTMLElement;
+  candidatesTitle: HTMLSpanElement;
+  candidatesEmpty: HTMLParagraphElement;
+  candidatesList: HTMLDivElement;
 }
 
 let dom: PanelDom | null = null;
 let opened = false;
 let busyInfo: BusyInfo | null = null;
 let unbindPrefs: (() => void) | null = null;
+let unbindCandidates: (() => void) | null = null;
+let chatHookBound = false;
+/** 正在确认 / 重 Roll 的那一条（同一时刻只允许一个动作，避免连点造出两份写回）。 */
+let actionBusy = false;
+/** 正在编辑哪一条，以及编辑中的草稿（重绘列表时必须保留，否则一改就丢字）。 */
+let editingId: string | null = null;
+let editingText = '';
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -131,6 +155,31 @@ function buildSwitch(labelText: string, hintText: string): SwitchParts {
   return { row, input, hint };
 }
 
+/**
+ * 清空一个容器。
+ *
+ * 为什么不用 `textContent = ''`：单元测试里的假 DOM 只把它当普通字段，子节点还在，
+ * 重绘一次列表就会叠一层。`replaceChildren` 是真 DOM 的正解，假 DOM 用数组清空顶上。
+ */
+function clearNode(node: HTMLElement): void {
+  const candidate = node as unknown as { replaceChildren?: () => void; children?: unknown[] };
+  if (typeof candidate.replaceChildren === 'function') {
+    candidate.replaceChildren();
+    return;
+  }
+  if (Array.isArray(candidate.children)) {
+    candidate.children.length = 0;
+    return;
+  }
+  node.textContent = '';
+}
+
+function el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string): HTMLElementTagNameMap[K] {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  return node;
+}
+
 function build(): PanelDom {
   const root = document.createElement('div');
   root.id = ROOT_ID;
@@ -153,9 +202,12 @@ function build(): PanelDom {
   win.setAttribute('role', 'dialog');
   win.setAttribute('aria-modal', 'true');
   win.setAttribute('aria-label', PANEL_TITLE);
-  // 基类写死了 height:var(--bbi-win-max-h) 与 max-height，这里收回成「按内容」
+  // 基类写死了 height:var(--bbi-win-max-h) 与 max-height，这里收回成「按内容」；
+  // 候选一多就滚动，别把整个视口顶满
   win.style.height = 'auto';
-  win.style.maxHeight = 'none';
+  win.style.maxHeight = '80vh';
+  win.style.display = 'flex';
+  win.style.flexDirection = 'column';
 
   const head = document.createElement('header');
   head.className = 'bbi-head';
@@ -196,12 +248,17 @@ function build(): PanelDom {
 
   const body = document.createElement('main');
   body.className = 'bbi-body';
+  body.style.overflowY = 'auto';
   const page = document.createElement('div');
   page.className = 'bbi-page';
 
   const auto = buildSwitch(
     '自动出图',
     '划完线直接开始出图。关掉则只写入 tag，由你自己点卡片上的「生成图片」。',
+  );
+  const confirm = buildSwitch(
+    '需确认',
+    '先出候选 tag，确认后才写进正文——确认即出图，不会再问一次。自动出图开着时此项不可用。',
   );
   const orb = buildSwitch('显示悬浮球', '关掉后可以从魔术棒菜单（🍃 划线出图）进来这里重新打开。');
 
@@ -217,20 +274,69 @@ function build(): PanelDom {
   styleSmallButton(cancelButton);
   busyRow.append(busyLabel, cancelButton);
 
-  page.append(auto.row, auto.hint, orb.row, orb.hint, busyRow);
+  page.append(auto.row, auto.hint, confirm.row, confirm.hint, orb.row, orb.hint, busyRow);
+
+  // —— 候选区（确认式）：标题 + 空态 + 列表 ——
+  const candidatesSection = el('section');
+  Object.assign(candidatesSection.style, {
+    marginTop: '18px',
+    paddingTop: '14px',
+    borderTop: '1px solid var(--bbi-line)',
+  } as Partial<CSSStyleDeclaration>);
+
+  const candidatesTitle = el('span', 'bbi-field-label');
+  Object.assign(candidatesTitle.style, {
+    display: 'block',
+    fontWeight: '600',
+    fontSize: '13px',
+    color: 'var(--bbi-ink)',
+    marginBottom: '8px',
+  } as Partial<CSSStyleDeclaration>);
+
+  const candidatesEmpty = el('p', 'bbi-field-hint');
+  candidatesEmpty.textContent = '没有待确认的画面。划选正文 → 点「生成 tag」，候选会出现在这里。';
+
+  const candidatesList = el('div');
+  candidatesList.style.display = 'flex';
+  candidatesList.style.flexDirection = 'column';
+
+  candidatesSection.append(candidatesTitle, candidatesEmpty, candidatesList);
+
+  page.append(candidatesSection);
   body.append(page);
   win.append(head, body);
   overlay.append(win);
   root.append(overlay);
 
-  return { root, overlay, autoInput: auto.input, orbInput: orb.input, busyRow, busyLabel, cancelButton };
+  return {
+    root,
+    overlay,
+    autoInput: auto.input,
+    confirmInput: confirm.input,
+    confirmRow: confirm.row,
+    orbInput: orb.input,
+    busyRow,
+    busyLabel,
+    cancelButton,
+    candidatesSection,
+    candidatesTitle,
+    candidatesEmpty,
+    candidatesList,
+  };
 }
 
 /** 把偏好值刷到控件上。打开面板时、以及任何地方改了偏好，都走它。 */
 function syncControls(prefs: Prefs): void {
   if (!dom) return;
   if (dom.autoInput.checked !== prefs.autoGenerate) dom.autoInput.checked = prefs.autoGenerate;
+  if (dom.confirmInput.checked !== prefs.confirmTag) dom.confirmInput.checked = prefs.confirmTag;
   if (dom.orbInput.checked !== prefs.showOrb) dom.orbInput.checked = prefs.showOrb;
+
+  // 互锁的 UI 投影。真正的压制在 normalizePrefs 里（状态层），这里只负责「看起来也对」。
+  const locked = prefs.autoGenerate;
+  dom.confirmInput.disabled = locked;
+  dom.confirmRow.style.opacity = locked ? '0.45' : '1';
+  dom.confirmRow.title = locked ? '自动出图开着时，划线就已经是完整闭环了，不需要再确认一次' : '';
 }
 
 function applyBusy(next: PanelDom): void {
@@ -243,13 +349,224 @@ function applyBusy(next: PanelDom): void {
   next.busyRow.style.display = 'flex';
 }
 
+/** 卡片上的小按钮（全部走内联样式，不依赖 scoped 类）。 */
+function cardButton(text: string, onClick: () => void, disabled = false): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = text;
+  styleSmallButton(button);
+  button.style.padding = '3px 11px';
+  button.style.fontSize = '12px';
+  if (disabled) {
+    button.disabled = true;
+    button.style.opacity = '0.5';
+    button.style.cursor = 'default';
+  } else {
+    button.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      onClick();
+    });
+  }
+  return button;
+}
+
+/** 一条候选的动作：串行执行，跑的时候整列按钮禁用（避免连点写两遍）。 */
+async function runAction(label: string, fn: () => Promise<{ status: string; message: string }>): Promise<void> {
+  if (actionBusy) return;
+  actionBusy = true;
+  renderCandidates();
+  try {
+    const outcome = await fn();
+    if (outcome.status === 'aborted') notify('info', '已取消，正文未改动');
+  } catch (error) {
+    console.error(`[CCX] ${label}失败`, error);
+    notify('error', `「${label}」失败：${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    actionBusy = false;
+    renderCandidates();
+  }
+}
+
+function buildCard(item: ImageCandidate, ordinal: number): HTMLElement {
+  const card = el('div');
+  Object.assign(card.style, {
+    border: '1px solid var(--bbi-line)',
+    borderRadius: 'var(--bbi-radius-sm)',
+    background: 'var(--bbi-surface-2)',
+    padding: '10px 12px',
+    marginBottom: '8px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+  } as Partial<CSSStyleDeclaration>);
+
+  const head = el('div');
+  Object.assign(head.style, {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '8px',
+  } as Partial<CSSStyleDeclaration>);
+
+  const title = el('span');
+  title.textContent = `画面 ${String(ordinal + 1).padStart(2, '0')} · 第 ${item.floor} 楼`;
+  Object.assign(title.style, {
+    font: '600 12px/1.5 var(--bbi-font-sans)',
+    color: 'var(--bbi-ink)',
+  } as Partial<CSSStyleDeclaration>);
+
+  const badge = el('span');
+  badge.textContent = `待确认 ${item.activeVersion + 1}/${item.versions.length}`;
+  Object.assign(badge.style, {
+    font: '600 11px/1.4 var(--bbi-font-sans)',
+    color: 'var(--bbi-ink-soft)',
+    border: '1px solid var(--bbi-line)',
+    borderRadius: 'var(--bbi-radius-pill)',
+    padding: '1px 8px',
+    whiteSpace: 'nowrap',
+  } as Partial<CSSStyleDeclaration>);
+
+  head.append(title, badge);
+
+  const editing = editingId === item.imageId;
+  const current = item.versions[item.activeVersion];
+
+  if (editing) {
+    const area = document.createElement('textarea');
+    area.value = editingText;
+    Object.assign(area.style, {
+      width: '100%',
+      minHeight: '64px',
+      boxSizing: 'border-box',
+      background: 'var(--bbi-surface)',
+      color: 'var(--bbi-ink)',
+      border: '1px solid var(--bbi-line-strong)',
+      borderRadius: 'var(--bbi-radius-sm)',
+      padding: '6px 8px',
+      font: '12px/1.55 var(--bbi-font-sans)',
+      resize: 'vertical',
+    } as Partial<CSSStyleDeclaration>);
+    area.addEventListener('input', () => {
+      editingText = area.value;
+    });
+
+    const row = el('div');
+    row.style.display = 'flex';
+    row.style.gap = '6px';
+    row.append(
+      cardButton(
+        '保存',
+        () => {
+          // 只改候选，不重跑 API：改一两个词不该花额度
+          if (!editCandidateTag(item.imageId, editingText)) notify('warning', '提示词不能为空');
+          else {
+            editingId = null;
+            editingText = '';
+            diagnostic('panel:candidateEdit', { imageId: item.imageId });
+          }
+          renderCandidates();
+        },
+        actionBusy,
+      ),
+      cardButton(
+        '取消',
+        () => {
+          editingId = null;
+          editingText = '';
+          renderCandidates();
+        },
+        actionBusy,
+      ),
+    );
+
+    card.append(head, area, row);
+    return card;
+  }
+
+  const tag = el('p');
+  tag.textContent = current.image.tag;
+  Object.assign(tag.style, {
+    margin: '0',
+    maxHeight: '72px',
+    overflowY: 'auto',
+    font: '12px/1.55 var(--bbi-font-sans)',
+    color: 'var(--bbi-ink)',
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
+  } as Partial<CSSStyleDeclaration>);
+
+  const row = el('div');
+  Object.assign(row.style, { display: 'flex', gap: '6px', flexWrap: 'wrap' } as Partial<CSSStyleDeclaration>);
+  row.append(
+    cardButton('✓ 确认', () => void runAction('确认', () => commitCandidate(item.imageId)), actionBusy),
+    cardButton('⟳ 重 Roll', () => void runAction('重 Roll', () => rerollCandidate(item.imageId)), actionBusy),
+    cardButton(
+      '✎ 编辑',
+      () => {
+        editingId = item.imageId;
+        editingText = current.image.tag;
+        renderCandidates();
+      },
+      actionBusy,
+    ),
+    cardButton(
+      '✕ 删除',
+      () => {
+        discardCandidate(item.imageId);
+        if (editingId === item.imageId) {
+          editingId = null;
+          editingText = '';
+        }
+        renderCandidates();
+      },
+      actionBusy,
+    ),
+  );
+
+  card.append(head, tag, row);
+  return card;
+}
+
+/** 重绘候选列表。池子一变、面板一打开、切聊天都会走它。 */
+export function renderCandidates(): void {
+  if (!dom) return;
+  paintCandidates(dom, listCandidates());
+}
+
+function paintCandidates(target: PanelDom, items: ImageCandidate[]): void {
+  target.candidatesTitle.textContent = items.length ? `待确认 ${items.length}` : '待确认';
+  target.candidatesEmpty.style.display = items.length ? 'none' : 'block';
+  clearNode(target.candidatesList);
+
+  // 编辑中的那条如果已经不在池子里（比如被别处删了），把编辑态一起清掉
+  if (editingId && !items.some(item => item.imageId === editingId)) {
+    editingId = null;
+    editingText = '';
+  }
+
+  items.forEach((item, index) => {
+    target.candidatesList.append(buildCard(item, index));
+  });
+}
+
 function bindDom(next: PanelDom): void {
   next.autoInput.addEventListener('change', () => {
     const value = next.autoInput.checked;
     diagnostic('panel:autoGenerate', { value });
+    // 打开自动出图会把「需确认」压成 false（状态层负责），这里只补一句人话
     updatePrefs({ autoGenerate: value });
-    // 只在关掉时提示：开启是默认态，说一句反而啰嗦；关掉要让人知道「以后得自己点」
-    if (!value) notify('info', '已切换为手动：划完线只写 tag，出图请你点卡片');
+    notify(
+      'info',
+      value ? '已开启自动出图：划线后直接出图（需确认已自动关闭）' : '已切换为手动：划完线只写 tag，出图请你点卡片',
+    );
+  });
+
+  next.confirmInput.addEventListener('change', () => {
+    const value = next.confirmInput.checked;
+    diagnostic('panel:confirmTag', { value });
+    updatePrefs({ confirmTag: value });
+    if (value) notify('info', '已开启需确认：划线后先生成候选，确认才写入正文并出图');
   });
 
   next.orbInput.addEventListener('change', () => {
@@ -266,6 +583,23 @@ function bindDom(next: PanelDom): void {
 
   unbindPrefs?.();
   unbindPrefs = onPrefsChange(prefs => syncControls(prefs));
+
+  unbindCandidates?.();
+  unbindCandidates = onCandidatesChange(() => renderCandidates());
+
+  // 切聊天后候选属于另一个聊天：重绘而不是清空（池子按 chatId 过滤，天然隔离）
+  if (!chatHookBound) {
+    const context = getContext();
+    const chatChanged = context?.eventTypes?.CHAT_CHANGED;
+    if (chatChanged && context?.eventSource?.on) {
+      context.eventSource.on(chatChanged, () => {
+        editingId = null;
+        editingText = '';
+        renderCandidates();
+      });
+      chatHookBound = true;
+    }
+  }
 }
 
 /** 确保已插入柏宝绘的 shadow；返回是否可用。 */
@@ -287,9 +621,10 @@ function show(next: PanelDom): void {
   next.root.dataset.theme = readBaibaiTheme();
   syncControls(readPrefs());
   applyBusy(next);
+  renderCandidates();
   next.overlay.style.display = 'flex';
   opened = true;
-  diagnostic('panel:open', { theme: next.root.dataset.theme });
+  diagnostic('panel:open', { theme: next.root.dataset.theme, pending: countPending() });
 }
 
 export function closePanel(): void {
@@ -353,4 +688,16 @@ export function bindPanelHotkeys(): () => void {
 /** 仅供诊断：面板是否已挂在柏宝绘的 shadow 上。 */
 export function isPanelMounted(): boolean {
   return Boolean(baibaiShadow()?.getElementById(ROOT_ID));
+}
+
+/** 仅供测试：清掉「聊天事件只绑一次」与编辑态（模块级状态，用例之间会互相污染）。 */
+export function resetPanelState(): void {
+  chatHookBound = false;
+  editingId = null;
+  editingText = '';
+  actionBusy = false;
+  unbindCandidates?.();
+  unbindCandidates = null;
+  unbindPrefs?.();
+  unbindPrefs = null;
 }

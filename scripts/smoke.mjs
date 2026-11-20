@@ -145,7 +145,8 @@ console.log('入口加载:', typeof mod === 'object');
 console.log('调试出口:', api ? Object.keys(api).sort().join(', ') : '缺失');
 console.log('版本:', api?.version);
 console.log('偏好:', JSON.stringify(api?.prefs?.()));
-console.log('悬浮球:', orb ? `已创建（${orb.textContent}）` : '未创建');
+const orbGlyph = orb?.children?.[0]?.textContent ?? orb?.textContent ?? '';
+console.log('悬浮球:', orb ? `已创建（${orbGlyph}，底图=${orb.style.background}）` : '未创建');
 console.log('魔术棒条目:', menuItem ? `已注入（${menuItem.children?.map(c => c.textContent || c.className).join(' / ')}）` : '未注入');
 
 // 面板：柏宝绘的 shadow 里已经有内容（模拟它 mount 过）

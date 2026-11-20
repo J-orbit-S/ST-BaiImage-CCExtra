@@ -9,7 +9,13 @@
  *
  * 与柏宝绘那颗球的区别：**放在 light DOM**（`document.body`），不塞进它的 shadow root。
  * 理由是入口应该比面板更早可用——柏宝绘还没加载完时，用户点球至少能得到一句解释，
- * 而不是「点了没反应」。球的视觉极简（圆底 + emoji + 阴影），不需要它那套主题变量。
+ * 而不是「点了没反应」。视觉上更进一步：**只有那片叶子，没有圆底、没有边框、没有底色**，
+ * 看起来像飘在页面边缘的一片叶子，而不是一颗按钮。
+ *
+ * 没有底图之后有两处必须这么写，否则手感会坏：
+ * 1. **热区仍然是 44px 的透明方块**。叶子本身只有 26px 宽，直接当点击区域很难点中；
+ * 2. **悬停放大做在内层 span 上**。外层 `transform` 已经被「贴边半隐的 translateX」占用，
+ *    同一个属性写两个效果会互相覆盖（放大一跳，半隐就没了）。
  */
 
 import { diagnostic } from '@/runner/diagnostic';
@@ -44,6 +50,8 @@ interface OrbPos {
 }
 
 let orb: HTMLDivElement | null = null;
+/** 内层叶子。悬停放大只动它，外层 transform 留给贴边。 */
+let glyph: HTMLSpanElement | null = null;
 let pos: OrbPos = { dock: 'right', x: 0, y: 0 };
 let dragging = false;
 let awake = false;
@@ -178,25 +186,23 @@ function ensureOrb(): HTMLDivElement {
   el.id = ORB_ID;
   el.setAttribute('role', 'button');
   el.tabIndex = 0;
-  el.title = '划线出图';
+  el.title = '划线出图（点一下打开面板）';
   el.setAttribute('aria-label', '划线出图');
-  el.textContent = '🍃';
 
   Object.assign(el.style, {
     position: 'fixed',
     zIndex: '9999',
+    // 44px 透明热区：叶子只有 26px，直接当点击区域会很难点中
     width: `${ORB_SIZE}px`,
     height: `${ORB_SIZE}px`,
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
     boxSizing: 'border-box',
-    borderRadius: '999px',
-    background: 'rgba(255,255,255,.92)',
-    border: '1px solid rgba(0,0,0,.08)',
-    boxShadow: '0 6px 16px rgba(0,0,0,.24)',
-    fontSize: '22px',
-    lineHeight: '1',
+    // 没有底图：不设 background / border / borderRadius / boxShadow（见文件头）
+    background: 'transparent',
+    border: '0',
+    boxShadow: 'none',
     cursor: 'grab',
     userSelect: 'none',
     touchAction: 'none',
@@ -204,24 +210,42 @@ function ensureOrb(): HTMLDivElement {
     transition: 'transform .28s cubic-bezier(.22,.61,.36,1), opacity .28s cubic-bezier(.22,.61,.36,1)',
   } as Partial<CSSStyleDeclaration>);
 
+  const leaf = document.createElement('span');
+  leaf.textContent = '🍃';
+  Object.assign(leaf.style, {
+    display: 'inline-block',
+    fontSize: '26px',
+    lineHeight: '1',
+    pointerEvents: 'none',
+    // 没有圆底之后，叶子在浅色背景上会糊；一层淡投影让它自己站得住
+    filter: 'drop-shadow(0 2px 4px rgba(0,0,0,.35))',
+    transition: 'transform .18s ease',
+  } as Partial<CSSStyleDeclaration>);
+  el.appendChild(leaf);
+  glyph = leaf;
+
   el.addEventListener('pointerdown', onPointerDown);
   el.addEventListener('pointermove', onPointerMove);
   el.addEventListener('pointerup', onPointerUp);
   el.addEventListener('pointercancel', onPointerUp);
   el.addEventListener('pointerenter', () => {
     awake = true;
+    setGlyphScale(1.18);
     applyTransform();
   });
   el.addEventListener('pointerleave', () => {
     awake = false;
+    setGlyphScale(1);
     applyTransform();
   });
   el.addEventListener('focus', () => {
     awake = true;
+    setGlyphScale(1.18);
     applyTransform();
   });
   el.addEventListener('blur', () => {
     awake = false;
+    setGlyphScale(1);
     applyTransform();
   });
   el.addEventListener('keydown', event => {
@@ -245,12 +269,18 @@ function onResize(): void {
   applyTransform();
 }
 
+/** 叶子自身的放大。不能写在外层：那里的 transform 是贴边滑出用的。 */
+function setGlyphScale(scale: number): void {
+  if (glyph) glyph.style.transform = scale === 1 ? '' : `scale(${scale})`;
+}
+
 /** 按偏好显示/隐藏。幂等，可反复调用。 */
 export function syncOrb(show: boolean): void {
   if (typeof document === 'undefined') return;
   if (!show) {
     orb?.remove();
     orb = null;
+    glyph = null;
     if (boundResize) {
       window.removeEventListener('resize', onResize);
       boundResize = false;

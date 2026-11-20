@@ -715,3 +715,105 @@ npm run build       dist/index.js 191.5 KB（gzip 74.1 KB）
 
 **边界**：面板依赖 `#bbi-app-host` 这个 id 与 `#extensionsMenu` 的结构，两者都记在
 `VENDORED.md`「B 段」的 DOM 契约表里。失效表现都是「入口点了没反应/面板变宽」，不写坏数据。
+
+### 13.10 v0.2.1：确认式（候选池）与悬浮球去底图（2026-11-20）
+
+volume 2 的第一块。设计讨论稿在 `docs/VOLUME2.md`，这里只登记**实现契约**。
+
+#### 一次划线被切成三段
+
+| 段 | 落点 | 产出 | 有没有副作用 |
+|---|---|---|---|
+| A 分析 | `runner/analysis.ts` → `analyzeSelection()` | `SelectionAnalysis`（plan + 后处理过的 images + changes + 锚点） | 只发副 API 请求，**不写正文** |
+| B 确认 | `state/candidates.ts`（`chatMetadata`） | 待确认的 `ImageCandidate[]` | 写聊天元数据 |
+| C 写回 | `runner/commit.ts` → `writeAndPublish()` | 正文 + `bbiCharChanges` + 图片历史迁移 + 点卡片 | 唯一改正文的地方 |
+
+`runSelection()` 只剩分流：
+
+```
+confirmTag && !autoGenerate && images.length > 0  →  A → 候选池
+否则                                              →  A → C
+```
+
+> `confirmTag` 在状态层被 `autoGenerate` 压着，所以「自动出图开 + 需确认开」这条路不存在。
+> 详见 `state/prefs.ts` 的 `normalizePrefs`（顺序：先 autoGenerate，再压 confirmTag）。
+
+#### 候选存储契约
+
+- **键**：`chatMetadata['ST-BaiImage-CCExtra']`（与 `extensionSettings` 的同名键**不是一份东西**）。
+  形状 `{ v: 1, items: ImageCandidate[] }`。
+- **单条**：`imageId`（`planId:index`）、`planId`、`chatId`、`floor`、`swipeId`、
+  `segments: SegmentAnchor[]`、`index`、`versions[]`、`activeVersion`、`status`。
+- **归一化**：`normalizeStore` 单条坏了只丢那一条；`activeVersion` 越界夹回最后一版。
+  绝不因为池子坏了把划线流程打断（与 `imageSlots` 同一口径）。
+- **不存全局**：放 `extensionSettings` 会让 A 聊的候选出现在 B 聊。
+
+#### 「图是单位，段只是引用」
+
+```ts
+ImageCandidate.segments: SegmentAnchor[]   // 单插图长度 1；漫画页将来长度 N
+```
+
+重 Roll 一张 = 用它的 `segments` 重建锚点 → 重跑。把模型倒过来（段持有图）会把
+「三段 → 一页」挡死，这一条是多段落批量与漫画页共用的前提，见 VOLUME2 §5.2 / §14。
+
+#### 段落 ID（稳定、可重 Roll）
+
+```
+segmentId = hash(chatId | floor | swipeId | 锚点原文 | 同楼第 n 次出现)
+```
+
+**不含内容 hash**：重 Roll 不换 ID，所以「同一段的多版候选」挂在同一个 `imageId` 下。
+
+#### 确认时的定位契约（不能复用捕获快照）
+
+`planSelection` 第一行是 `hashText(mes) !== capture.sourceHash → stale`。确认发生在几分钟后，
+指纹必然对不上。所以走 `relocatePlan()`：
+
+```
+locateSelection({ raw: 当前 mes, domText: 锚点文本, before: 前 200 字, after: 后 200 字 })
+  → buildCapture（sourceHash = 当前正文）
+  → planSelection（此时指纹必然相等）
+```
+
+失败（那段话被改掉 / 多义）→ **不写、给人话、保留候选**，绝不「插到附近」。
+`confirm.test.ts` 有一条「楼里上面多了一段也能插对位置」专门钉住这条。
+
+#### 楼层角色增量：从「替换」改成「累加」
+
+`applyMessageText` 的 `extraUpdate` 语义是 `value === undefined → 删除该键`。
+`makeCharTagFloorDelta([])` 正好返回 `undefined`，于是「同一楼确认第二张图」会把
+第一张写入的 `bbiCharChanges` **整键删掉**，角色库丢建档。
+
+现在的规则：同一 `swipe` 时把旧 delta 的 `ops` 接在新 ops 前面，再整体写回。
+不同 swipe 则替换（那一份正文的变更与新正文无关）。v0.2.0 就存在这个隐性问题，
+确认式把它变成了常态（一张一张点头），所以在这一版修掉。
+
+#### 新增故障树条目
+
+| 现象 | 最可能的原因 | 去哪看 |
+|---|---|---|
+| 点了「生成 tag」但正文没变 | 确认式开着：候选进了池子 | `[CCX][AutoTagDebug] runSelection:pending` |
+| 面板里没有候选 | 候选属于另一个聊天 / 池子被清 | `chatMetadata['ST-BaiImage-CCExtra']`；`CCExtra.candidates()` |
+| 确认报「这段文字已经被改过了」 | 锚点所在段落被编辑过 | `commit.ts` 的 `anchor-lost`；候选仍在池子里 |
+| 重 Roll 后图没变 | 正常：重 Roll 只换提示词 | 面板文案；`candidate:reroll` 诊断 |
+| 第二张确认后角色没建档 | 增量覆盖（已修）；看 `extra.bbiCharChanges.ops` 是否为累加结果 | `confirm.test.ts` 的累加用例 |
+
+#### 悬浮球：只有叶子，没有底
+
+去掉 `background / border / boxShadow / borderRadius`，保留 44px 透明热区（叶子 26px，太窄点不中）；
+悬停放大写在内层 `span`——外层的 `transform` 已经被「贴边半隐的 translateX」占用，
+同一属性写两个效果会互相覆盖。
+
+#### 验收
+
+```
+npm run typecheck   0 error
+npm test            35 文件 / 552 tests（新增 43：18 候选池 + 12 确认式 + 5 面板候选 + 8 互锁/更新）
+npm run smoke       面板 3 个开关、球 background=transparent、调试口含 candidates/commit/reroll
+verify:upstream     40 文件 SHA256 + 3 片段 + 10 常量全 MATCH（柏宝绘零改动）
+npm run build       dist/index.js 206.7 KB（gzip 78.6 KB）
+```
+
+**L1 例外仍然是 1 条**：喂给模型的 `messages` 只有 `source` 一处不同（整楼 → 切片）。
+确认式只改变「什么时候写正文」，不改变「模型看到什么」。

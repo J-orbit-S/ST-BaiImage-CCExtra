@@ -24,12 +24,21 @@ export const PREFS_KEY = 'ST-BaiImage-CCExtra';
 export interface Prefs {
   /** 划线写完 tag 后是否自动点卡片的「生成图片」。关掉 = 手动模式（只写 tag）。 */
   autoGenerate: boolean;
+  /**
+   * 是否先出候选、等确认再写回（= 确认式）。
+   *
+   * 与 `autoGenerate` **不是正交的两条轴**，而是有上下级：自动出图开着时这一项被强制为关。
+   * 理由不是「会打架」，而是**语义重复** —— 「自动出图」已经是「划线 → 写 tag → 出图」
+   * 一条完整闭环，中间再插一步确认没有意义，两个勾同时亮着还会自相矛盾。
+   */
+  confirmTag: boolean;
   /** 是否显示 🍃 悬浮球。 */
   showOrb: boolean;
 }
 
 export const DEFAULT_PREFS: Readonly<Prefs> = Object.freeze({
   autoGenerate: true,
+  confirmTag: false,
   showOrb: true,
 });
 
@@ -62,8 +71,13 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  */
 export function normalizePrefs(raw: unknown): Prefs {
   const source = isPlainObject(raw) ? raw : {};
+  // 顺序很重要：先算 autoGenerate，再用它压 confirmTag。反过来会漏掉「自动出图开着、
+  // 需确认也开着」这种非法组合（手改 settings.json、旧版本写下的值都可能造出来）。
+  const autoGenerate = asBoolean(source.autoGenerate, DEFAULT_PREFS.autoGenerate);
+  const confirmTag = autoGenerate ? false : asBoolean(source.confirmTag, DEFAULT_PREFS.confirmTag);
   return {
-    autoGenerate: asBoolean(source.autoGenerate, DEFAULT_PREFS.autoGenerate),
+    autoGenerate,
+    confirmTag,
     showOrb: asBoolean(source.showOrb, DEFAULT_PREFS.showOrb),
   };
 }
