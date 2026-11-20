@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   activeComfyPreset,
@@ -6,6 +6,8 @@ import {
   activeNaiPlan,
   activeOrientationLock,
   builtinComfyPromptSet,
+  disableSettingsDraft,
+  enableSettingsDraft,
   readSettings,
   SETTINGS_KEY,
   settings,
@@ -57,6 +59,13 @@ function baseSettings(): AnyRecord {
 
 beforeEach(() => {
   vi.unstubAllGlobals();
+  // 测试进程里默认启用了可写草稿（为了让上游单测能构造场景）。
+  // 这一组断言要验的是**生产语义**，所以先关掉草稿。
+  disableSettingsDraft();
+});
+
+afterEach(() => {
+  enableSettingsDraft();
 });
 
 describe('只读不变量', () => {

@@ -1,0 +1,46 @@
+{
+  "nai-char-prompts": {
+    "sha256": "b2b8c8f66d4a0c875b9694cee799165e20cc1f48dad949459a916cbaf3f279c8",
+    "messageCount": 5,
+    "roles": [
+      "system",
+      "system",
+      "system",
+      "system",
+      "user"
+    ]
+  },
+  "nai-single-string": {
+    "sha256": "eaa85ba9ad23b5a2b97a484f9c5c4140323eb1ac01434f12d9b470a9a12781a2",
+    "messageCount": 5,
+    "roles": [
+      "system",
+      "system",
+      "system",
+      "system",
+      "user"
+    ]
+  },
+  "comfy-tags": {
+    "sha256": "adf0de3153afffd2cb92c1f86ad36ee5a6e7c31c59d55822483f600396fe0a4d",
+    "messageCount": 5,
+    "roles": [
+      "system",
+      "system",
+      "system",
+      "system",
+      "user"
+    ]
+  },
+  "nai-custom-thinking": {
+    "sha256": "2ec528ea245f5f65ab3259f77f4d9ffc3fd15b7d42ace2507f73fa5aa0dd721d",
+    "messageCount": 5,
+    "roles": [
+      "system",
+      "system",
+      "system",
+      "system",
+      "user"
+    ]
+  }
+}

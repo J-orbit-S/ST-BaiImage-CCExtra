@@ -13,6 +13,7 @@
     "setup": "npm install --legacy-peer-deps --cache ./.npm-cache"
   },
   "devDependencies": {
+    "@types/node": "^26.6.6",
     "typescript": "^5.7.0",
     "vitest": "^4.1.10"
   }
