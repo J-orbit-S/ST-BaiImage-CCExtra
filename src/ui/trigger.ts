@@ -111,7 +111,11 @@ function settle(): void {
   if (busy) return;
   const outcome = captureSelection();
   if (!outcome.ok) {
-    diagnostic('trigger:no-capture', { reason: outcome.reason, detail: outcome.detail ?? null });
+    // 「什么都没选中」是绝大多数鼠标抬起的正常情况（点按钮、点面板），不记日志；
+    // 只有用户确实划了东西、却没通过校验时才值得进诊断流。
+    if (outcome.reason !== 'no-selection' && outcome.reason !== 'empty-selection') {
+      diagnostic('trigger:no-capture', { reason: outcome.reason, detail: outcome.detail ?? null });
+    }
     hide();
     return;
   }
