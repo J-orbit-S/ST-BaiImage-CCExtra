@@ -1,50 +1,97 @@
-# ST-BaiImage-CCExtra
+# ST-BaiImage-CCExtra · 柏宝绘伴生插件
 
-柏宝绘（ST-BaiBai-Image）的伴生插件。目标：复刻柏宝绘的「文本 → tag」LLM 分析链路，做到与上游**协议级逐字一致**，唯一差异是输入从「整楼正文」换成「划线文本」。
+**在正文里划一段 → 点「划线出图」→ tag 就插在那一段后面。** 分析过程与柏宝绘**逐字一致**，只是把送给 LLM 的「一整层楼」换成了你划的那几行。
 
-工程总方案见工作区：`ST-BaiImage-CCExtra-分析链路协议级复刻-工程方案.md`。
-逐字复制登记、不变量与排错索引见本仓库 `VENDORED.md`。
+- 不修改柏宝绘任何一行代码，只读它的设置与角色库；
+- 没有自己的设置面板：破限词、规范、思维链、方案、接入点、副 API 全在柏宝绘里改，本插件每次请求现读；
+- 出图（B 段）交给柏宝绘的卡片，画师串 / 负面词 / 并发 / 图库全部走它的原逻辑。
 
-## 进度
+```
+划线 ──▶ 行对齐 ──▶ 柏宝绘的 clean→prompt→副API→protocol→rebase ──▶ 写回正文 ──▶ 柏宝绘卡片出图
+         (本插件)      (逐字搬运的上游代码，只有输入是划线)          (CAS 写回)
+```
 
-- ✅ **M0** 项目骨架 + 上游锚点（`d6c5519` / v0.3.6）
-- ✅ **M1** 纯函数逐字搬运：`clean / protocol / rebase / slotPlan / imageTagRegex / size / mossLayout` + nai 三判定
-- ✅ **M2** Adapter：只读设置（递归 Proxy + 测试草稿层）、共享副 API 渠道、`charTags` 运行时、上下文/角色锚点/柏宝书记忆
-- ✅ **M3** 提示词层：`prompt.ts` 逐字搬入 + 10 份内置提示词脚本抽取 + 黄金哈希哨兵（`consistency/`）
-- ✅ **M4** 划线取词：`selection/`（定位核心 / 捕获 / 切片⇄整楼行号换算 / 写回重定位）
-- ⬜ **M5** 分析执行：`runner.ts` 接入（把 `source` 换成划线文本）
-- ⬜ **M6** 出图：调公开 `generate()` + 切方案
-- ⬜ **M7** UI：划线触发、预览、进度与失败提示
+## 安装
 
-## 目录约定
+1. 先装并配置好 [柏宝绘](https://github.com/baibai-git/ST-BaiBai-Image)（0.3.6 为锚点版本）。
+2. 把本仓库整个目录放进 `SillyTavern/data/<user>/extensions/third-party/ST-BaiImage-CCExtra/`。
+   仓库里已带构建产物 `dist/index.js`，**不需要自己编译**。
+3. 刷新 SillyTavern。控制台出现 `[CCX] ST-BaiImage-CCExtra 0.1.0 已加载` 即成功。
+
+> 改了源码才需要构建：`npm run setup && npm run build`（Node 18+）。
+
+## 使用
+
+1. 在**AI 剧情楼**的正文里划一段（可以跨行，不能跨楼）。
+2. 选区右下角浮出「划线出图」，点它。
+3. 等 1～2 秒，正文里多出 `<bbi_image>…</bbi_image>`，柏宝绘的卡片随之出现；点卡片上的「生成图片」。
+
+想调整效果：去柏宝绘里换方案 / 改提示词 / 换副 API，**下一次划线立刻生效**（配置不缓存）。
+
+## 边界（做什么、不做什么）
+
+| 事项 | 本插件 |
+|---|---|
+| 读柏宝绘设置（方案、提示词、副 API、画幅锁、剔除标签） | ✅ 只读，每次请求现读 |
+| 读角色库 / 柏宝书角色状态 / 世界书 / 角色卡 / 人设 | ✅ 与柏宝绘同口径（按整楼取，不因划线缩小） |
+| 写 tag 与 `extra.bbiCharChanges` | ✅ 格式与柏宝绘逐字相同 |
+| 写柏宝绘的设置 | ❌ 结构上禁止：只读 Proxy，任何写入抛错 |
+| 自己的设置面板 / 配置存储 | ❌ 一个 key 都不写 |
+| 自动出图 | ❌ 由柏宝绘卡片负责（原因见 `VENDORED.md`） |
+| 跨楼划线 | ❌ 明确拒绝，请分次划 |
+
+## 一致性怎么保证（三道闸）
+
+| 闸 | 管什么 | 命令 |
+|---|---|---|
+| 字节级 | vendored 代码有没有被改 | `BAIBAI_UPSTREAM=<柏宝绘路径> npm run verify:upstream`（40 文件 SHA256 + 3 片段 + 10 常量） |
+| 行为级 | 发给 LLM 的 messages 有没有变 | `npm test` 里的 `consistency/golden.test.ts`（4 场景 messages SHA256） |
+| 端到端 | 划线这一路有没有接错 | `npm test` 里的 `runner/runSelection.test.ts`（假宿主 + 真上游代码） |
+
+柏宝绘升级后：先跑 ①，红灯说明上游协议变了，先对拍再同步；① 绿而线上不对，问题在划选取词或写回坐标。
+
+## 已知限制
+
+1. **重复划线会被拦一次**：同一段文字连续点两次，第二次提示「已经出过图了」。想重出先在卡片里删掉那几张。
+2. **划线与原文必须逐字一致**：如果你划完之后别的插件改了正文，会提示「请重新划线」（指纹不符）。
+3. **一行一个 tag**：同一行多次划线会各插一批，卡片按顺序排列。
+4. **漫画方案**下划线出的是「这一段的漫画页」，页数仍由模型按内容决定。
+5. 出图仍要点卡片——柏宝绘的自动出图标记是它进程内的内存 Map，第三方无法置位（不碰它是刻意的）。
+
+## 开发
+
+```bash
+npm run setup            # 本机 npm 解析 vitest peer 有 bug，必须带 --legacy-peer-deps
+npm run typecheck
+npm test                 # 26 文件 / 425 tests
+npm run build            # → dist/index.js（单文件）
+```
 
 ```
 src/
-├── autoTag/      # vendored：clean/protocol/rebase/slotPlan/prompt/context/charAnchors/...
-├── st/           # vendored：context/imageTagRegex
-├── backends/     # vendored：size/mossLayout/comfyTemplates/comfyui；nai 为逐字抽取的判定
-├── api/          # vendored：client（副 API 调用）
-├── state/        # vendored：charTags/globalCharTags/history；settings 为只读 Adapter
-├── generationMeta.ts  # vendored
-├── shims/vue.ts  # reactive 等价 shim（让上游文件一字不改可搬）
-├── consistency/  # 黄金哈希哨兵 + 基准快照
-└── selection/    # 自有代码：划线取词与坐标换算（唯一允许写业务逻辑的地方）
+├── autoTag/ st/ backends/ api/ state/   # vendored：逐字复制柏宝绘，禁改逻辑
+├── state/settings.ts                    # Adapter：只读 Proxy
+├── consistency/                         # 黄金哈希哨兵
+├── selection/                           # 自有：划线取词与坐标换算
+├── runner/                              # 自有：编排 + 后处理（复刻 runForFloor）
+└── ui/                                  # 自有：划线浮出按钮
 ```
 
-`@` 别名 → `src/`，与上游同构，保证 vendored 文件 import 路径不改。
+- 逐字复制登记、LOCAL PATCHES、不变量、排错表 → **`VENDORED.md`**
+- 全链路工程方案（含字段级契约、故障树、里程碑） → **`docs/ENGINEERING.md`**
 
-## 命令
+## 排错
 
-```bash
-npm install --cache ./.npm-cache --legacy-peer-deps  # 本机 npm 解析 vitest peer 有 bug，必须带 legacy
-npm run typecheck
-npm test
-BAIBAI_UPSTREAM="C:/.../ST-BaiBai-Image" npm run verify:upstream
-```
+控制台过滤 `[CCX]`：
 
-## 铁律
+| 日志 | 含义 |
+|---|---|
+| `runSelection:enter` | 点了按钮，带上选区字数/行数/匹配方式 |
+| `runSelection:start` | 取词成功，`segmentCount` = 送给模型的行数，应为划线行数 |
+| `runSelection:skip reason=…` | 被闸门拦下（`stale` / `swipe-changed` / `already-processed` / …） |
+| `runSelection:saved` | 写入成功，带 images / changes / rebase 摘要 |
+| `writeback:abort reason=…` | 落点失效（`position-lost` / `rebase-failed`），正文未改 |
 
-1. vendored 文件（`autoTag/`、`st/`、`backends/`、`api/`、`state/` 除 `settings.ts`）**逐字复制，禁改逻辑**。
-2. 差异只能发生在 Adapter / shim / 生成物 / 新增模块；vendored 改动必须登记到 `VENDORED.md` 的 LOCAL PATCHES。
-3. 每次柏宝绘升级先跑 `verify:upstream` + 黄金对拍，确认协议未变再同步。
-4. 只读柏宝绘配置：`state/settings.ts` 在非测试环境写入即抛错。
+## 许可与致谢
+
+本插件是 [柏宝绘（ST-BaiBai-Image）](https://github.com/baibai-git/ST-BaiBai-Image) 的伴生工具，核心分析链路的代码版权归原作者柏柏所有，按「拿取并复用」的方式逐字搬运，未作任何逻辑修改。

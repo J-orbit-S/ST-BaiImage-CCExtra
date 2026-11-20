@@ -19,7 +19,7 @@
 **权威清单是 `scripts/verify-upstream.mjs` 里的 `VENDORED` 数组**（本文不重复维护 39 行，避免两处不同步）。
 每个 vendored 源码都必须带上游同名测试——测试是「行为没被搬运破坏」的证据。
 
-当前共 **39 个文件**（24 个源码 + 15 个测试），按层分组：
+当前共 **40 个文件**（25 个源码 + 15 个测试），按层分组：
 
 | 层 | 文件 |
 |---|---|
@@ -28,6 +28,7 @@
 | 上下文装配 | `autoTag/context.ts`、`autoTag/charAnchors.ts`、`autoTag/bookMemory.ts`、`state/charTags.ts`、`state/globalCharTags.ts` |
 | 副 API 调用 | `api/client.ts`、`state/history.ts` |
 | 出图后端 | `backends/comfyTemplates.ts`、`backends/comfyui.ts` |
+| 写回（CAS） | `st/messageEdit.ts` |
 | 逐字抽取（非整文件） | `backends/nai.ts` 的三个判定：`isNai5` / `isNai45` / `naiSupportsCharacterPrompts` |
 
 > 精确 SHA256 由 `npm run verify:upstream`（配 `BAIBAI_UPSTREAM`）实时计算。
@@ -83,8 +84,9 @@ Windows 下全局 `core.autocrlf=true` 会在 `git checkout` 时把 LF 转成 CR
 
 | 闸 | 管什么 | 命令 | 机制 |
 |---|---|---|---|
-| ① 字节级 | 代码有没有被改 | `npm run verify:upstream` | 39 文件 SHA256 + nai 3 片段 + 10 常量逐字 |
+| ① 字节级 | 代码有没有被改 | `npm run verify:upstream` | 40 文件 SHA256 + nai 3 片段 + 10 常量逐字 |
 | ② 行为级 | 跑出来的消息有没有变 | `npm test` 里的 `consistency/golden.test.ts` | 4 个场景的 messages SHA256 基准（`src/consistency/fixtures/autoTag-messages.json`） |
+| ③ 端到端 | 划线这一路有没有接错 | `npm test` 里的 `runner/runSelection.test.ts` | 假宿主 + 真 vendored 代码跑完整链路，断言「目标正文只有划线 / tag 落对行 / extra 格式对」 |
 
 黄金基准覆盖：NAI + 角色提示（默认方案）、NAI 非 4.5（单串 tag 分支）、ComfyUI 关自然语言、用户自定义思维链。
 确认变更符合预期后，用 `GOLDEN_UPDATE=1 npx vitest run src/consistency/golden.test.ts` 更新基准，并在 commit message 里写清原因。
@@ -95,7 +97,38 @@ Windows 下全局 `core.autocrlf=true` 会在 `git checkout` 时把 LF 转成 CR
 |---|---|---|---|
 | — | 无 | vendored 文件零改动（差异只在 Adapter / shim / 生成物，见上） | 2026-11-20 |
 
-## 目录为何与上游同构
+## 编排层：`src/runner/`（复刻 `runForFloor`，只有两处实质差异）
+
+`runner.ts` 没被整文件搬过来 —— 它绑定自动事件、写 toastr、管 `processed` 去重、还要处理
+单槽重写（slot）。CCExtra 走的是「用户划线 + 点按钮」，这些入口全都不适用。
+所以按**同样的顺序**重写编排，逻辑段一一对应，并把只有纯函数的部分抽到 `runner/plan.ts` 以便测试。
+
+| 上游 `runForFloor` | CCExtra `runSelection` | 差异 |
+|---|---|---|
+| 208–243 上下文/开关/排除/剧情楼闸门 | 同段 | 另加「捕获 swipe 与当前不符即拒绝」的 CAS |
+| 281–296 `source = 整楼 mes` | `source = planSelection(...).promptText` | ★ 唯一实质差异 ① |
+| 304–324 identity 去重 | 只保留「每楼一把锁」+ 会话内重复拦截 | 本插件点击即执行，没有自动流程 |
+| 327–352 memory/库/anchors/协议快照 | 同段 | 记忆与库仍按**整楼**取（§5.3） |
+| 358–433 重试循环 + validate 内解析 | 同段 | 解析目标换成 `sliceSegments` |
+| 437–518 changes→ops、@替换、漫画补外貌 | `runner/plan.ts` | 逐字 |
+| 547–585 `applyMessageText` CAS 写回 | 同段 | ★ rebase 基底用整楼现文 ② |
+| 586–632 成功/失败反馈 | 同段 | 文案换成「划线出图」 |
+
+**为什么只有这两处**：划线的语义就是「把送给 LLM 的那一层楼换成划线」，其余全部照抄。
+只要出现第三处差异，就要在 review 里被拦下——那意味着「分析过程和柏宝绘一模一样」不再成立。
+
+### B 段（出图）为什么不自己调公开接口
+
+柏宝绘的公开 `generate()` 返回 dataUrl 并可选落盘图库，**但不写楼层 extra**
+（`PublicGenerateResult` 里没有 slot 概念，图不会挂到任何卡片上）。
+如果 CCExtra 自己调它，结果会是「图库里有图、楼层卡片还是待生成」，比不做更糟。
+
+因此 B 段的选择是：**CCExtra 只负责把 tag 写对，出图交给柏宝绘的卡片**（点一下「生成图片」）。
+这样画师串、vibe、负面词、并发闸门、落盘、stale 判定全部走柏宝绘原逻辑，零漂移。
+自动出图（柏宝绘的 `autoGenerate` 标记）是它进程内的内存 Map，第三方无法置位——
+这条也不去碰，宁可少一步自动化，也不引入一个只能靠 DOM 点击维持的脆弱链路。
+
+
 
 vendored 文件里的 import 用的是 `@/autoTag/clean` 这类路径。为保证**逐字复制后 import 一个字都不用改**，
 CCExtra 采用与上游相同的 `src/autoTag|st|backends|state|api` 目录结构，`@` 别名指向 `src`。
@@ -106,8 +139,9 @@ CCExtra 采用与上游相同的 `src/autoTag|st|backends|state|api` 目录结�
 | 关口 | 命令 | 当前结果（2026-11-20） |
 |---|---|---|
 | 类型检查 | `npm run typecheck` | 通过，0 error |
-| 测试 | `npm test` | **24 文件 / 402 tests 全过**（334 上游 + 12 Adapter 自测 + 4 黄金哨兵 + 52 划线模块） |
-| 字节一致 | `BAIBAI_UPSTREAM=<上游路径> npm run verify:upstream` | **39 文件 SHA256 + nai 3 片段 + 10 常量全部 MATCH** |
+| 测试 | `npm test` | **26 文件 / 425 tests 全过**（334 上游 + 12 Adapter + 4 黄金哨兵 + 52 划线取词 + 23 编排/写回） |
+| 字节一致 | `BAIBAI_UPSTREAM=<上游路径> npm run verify:upstream` | **40 文件 SHA256 + nai 3 片段 + 10 常量全部 MATCH** |
+| 可构建 | `npm run build` | `dist/index.js` 单文件产物，34 modules |
 
 > 排错分界线：**测试挂 = 行为变了**（先看黄金基准是否该更新）；**SHA 不匹配 = 代码被改或换行被转换**；
 > 两者都绿而线上不对 = 问题在 Adapter 之外（划选取词、UI、出图链路）。
