@@ -112,14 +112,22 @@ describe('autoGenerateSlots', () => {
     expect(vi.mocked(notify)).toHaveBeenCalledWith('info', expect.stringContaining('生成图片'));
   });
 
-  it('关掉开关后一个都不点', async () => {
+  /**
+   * v0.2.2 的回归：这里**不许**再判「自动出图关着就不点」。
+   *
+   * 那个判断曾经同时存在于这里和 `writeAndPublish`，数据源还不同（偏好 vs 入参）。
+   * 「自动出图关 + 需确认开」时调用方说去出图、这里说开关关着不干，静默失效；
+   * 而全自动模式下两个判断恰好一致，于是 bug 藏了一整版。
+   * 守卫只有一处（`writeAndPublish` 的 input.autoGenerate），本函数照单执行。
+   */
+  it('偏好里的自动出图关着，也照调用方的要求点（守卫只有一处）', async () => {
     setAutoGenerate(false);
     const target = button('生成图片');
     installDom([target], 1);
 
     const outcome = await autoGenerateSlots({ floor: 3, seqs: [0], totalTags: 1 });
-    expect(outcome).toEqual({ clicked: 0, reason: 'disabled' });
-    expect(target.click).not.toHaveBeenCalled();
+    expect(outcome.clicked).toBe(1);
+    expect(target.click).toHaveBeenCalledTimes(1);
     setAutoGenerate(true);
   });
 

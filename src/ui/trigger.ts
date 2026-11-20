@@ -1,15 +1,23 @@
 /**
- * 划线触发：在正文里选中一段文字后，浮出一个小按钮「划线出图」。
+ * 划线触发：在正文里选中一段文字后，浮出一个小工具条。
  *
- * 三条纪律（都被真实浏览器行为逼出来的）：
+ * 三个按钮（v0.2.2）：
+ *   `⚡ 生成`    —— 立刻跑：分析 →（按模式）写回 / 进候选池
+ *   `＋ 待生成`  —— 只记下选段，不发请求、不开面板。攒够了一键全生成
+ *   `✕`         —— 丢弃本次选区（误划时的出口）
+ *
+ * 四条纪律（都被真实浏览器行为逼出来的）：
  *
  * 1. **捕获必须在 mouseup 当场做完**。浏览器会在下一次点击时清掉选区，
  *    等按钮的 click 回来再 `captureSelection()` 就已经没有选区了 —— 用户会看到
  *    「点了没反应」。所以 mouseup 时就地算好快照，click 只负责把快照交给执行层。
- * 2. **按钮的 mousedown 必须 preventDefault**。否则按下按钮的瞬间选区被清，
- *    页面还会滚一下（focus 行为）。代价很小，收益是点击手感与直觉一致。
+ *    三个按钮**共用同一份快照**。
+ * 2. **每个按钮的 mousedown 都必须 preventDefault**。否则按下按钮的瞬间选区被清，
+ *    页面还会滚一下（focus 行为）。漏一个，那个按钮按下去就等于什么都没选。
  * 3. **只在 AI 剧情楼浮出**。柏宝绘的楼层按钮也不给用户楼 —— 本插件出的是 tag，
  *    用户楼没有卡片可渲染，浮出来只会点到一句「这一楼不是剧情楼层」。
+ * 4. **忙态只留一个按钮**：`✕ 取消分析`。此时若还摆着「生成 / 待生成」，
+ *    点它们只会得到一句"正在跑"，不如把唯一的动作做成取消。
  *
  * 定位用 `range.getBoundingClientRect()` 的右下角，钳进视口；用 fixed 定位，
  * 这样不依赖任何 ST 布局容器（ST 改版不会把我们挤到页面外）。
@@ -18,16 +26,23 @@
 import { captureSelection, describeCapture, type SelectionCapture } from '@/selection/capture';
 import { isAiStoryMessage, getContext } from '@/st/context';
 import { cancelSelectionRun, runSelection } from '@/runner/runSelection';
+import { addDraft, buildSegmentAnchor, countDrafts } from '@/state/candidates';
 import { diagnostic } from '@/runner/diagnostic';
 import { notify } from '@/ui/notify';
 import { setBusyInfo, openPanel } from '@/ui/panel';
 
-const BUTTON_ID = 'ccx-select-trigger';
-const IDLE_TEXT = '生成 tag';
-/** 忙态不再是「分析中…」这种死字：这个按钮此刻就是取消键。 */
+const TOOLBAR_ID = 'ccx-select-toolbar';
+const GENERATE_TEXT = '⚡ 生成';
+const DRAFT_TEXT = '＋ 待生成';
+const CLOSE_TEXT = '✕';
 const CANCEL_TEXT = '✕ 取消分析';
 
-let button: HTMLButtonElement | null = null;
+let toolbar: HTMLDivElement | null = null;
+let generateButton: HTMLButtonElement | null = null;
+let draftButton: HTMLButtonElement | null = null;
+let closeButton: HTMLButtonElement | null = null;
+let cancelButton: HTMLButtonElement | null = null;
+
 let pending: SelectionCapture | null = null;
 let busy = false;
 let cancelling = false;
@@ -35,48 +50,70 @@ let cancelling = false;
 let runningFloor: number | null = null;
 let bound = false;
 
-function ensureButton(): HTMLButtonElement {
-  if (button && document.body.contains(button)) return button;
-  const el = document.createElement('button');
-  el.id = BUTTON_ID;
-  el.type = 'button';
-  el.textContent = IDLE_TEXT;
-  // 内联样式：不依赖任何样式表，也不会被 ST 主题的 button 规则改坏
+/** 三套颜色：正常 / 待生成（轻一点，不抢主按钮）/ 取消（红，明确会中止任务）。 */
+const BASE_BG = 'rgba(28,36,44,.94)';
+const DRAFT_BG = 'rgba(56,72,88,.94)';
+const CANCEL_BG = 'rgba(180,42,46,.95)';
+
+function stylePill(button: HTMLButtonElement, background: string): void {
+  Object.assign(button.style, {
+    padding: '4px 10px',
+    border: '1px solid rgba(255,255,255,.18)',
+    borderRadius: '999px',
+    background,
+    color: '#fff',
+    font: '500 12px/1.6 system-ui,"PingFang SC","Microsoft YaHei",sans-serif',
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+  } as Partial<CSSStyleDeclaration>);
+  // 按下不许清选区（见文件头第 2 条）。三个按钮都要绑，漏一个就点不动。
+  button.addEventListener('mousedown', event => event.preventDefault());
+}
+
+function makeButton(text: string, background: string, onClick: () => void): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = text;
+  stylePill(button, background);
+  button.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    onClick();
+  });
+  return button;
+}
+
+function ensureToolbar(): HTMLDivElement {
+  if (toolbar && document.body.contains(toolbar)) return toolbar;
+
+  const el = document.createElement('div');
+  el.id = TOOLBAR_ID;
   Object.assign(el.style, {
     position: 'fixed',
     zIndex: '2147483000',
     display: 'none',
-    padding: '4px 10px',
-    border: '1px solid rgba(255,255,255,.18)',
-    borderRadius: '999px',
-    background: 'rgba(28,36,44,.94)',
-    color: '#fff',
-    font: '500 12px/1.6 system-ui,"PingFang SC","Microsoft YaHei",sans-serif',
-    cursor: 'pointer',
-    boxShadow: '0 4px 14px rgba(0,0,0,.28)',
-    whiteSpace: 'nowrap',
+    alignItems: 'center',
+    gap: '4px',
+    // 容器本身不可见也不吃事件：否则它会在选区旁边留一块"透明墙"
+    background: 'transparent',
   } as Partial<CSSStyleDeclaration>);
-  // 按下不许清选区（见文件头第 2 条）
-  el.addEventListener('mousedown', event => event.preventDefault());
-  el.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    // 忙的时候这个按钮是「取消」，空闲时才是「划线出图」。
-    // 分支写在 click 里而不是靠 disabled：禁用就点不动，等于把唯一的取消入口藏了。
-    if (busy) {
-      cancel();
-      return;
-    }
-    void trigger();
-  });
+
+  generateButton = makeButton(GENERATE_TEXT, BASE_BG, () => void trigger());
+  draftButton = makeButton(DRAFT_TEXT, DRAFT_BG, () => parkSelection());
+  closeButton = makeButton(CLOSE_TEXT, BASE_BG, () => hide());
+  // 忙态才出现的唯一按钮
+  cancelButton = makeButton(CANCEL_TEXT, CANCEL_BG, () => cancel());
+  cancelButton.style.display = 'none';
+
+  el.append(generateButton, draftButton, closeButton, cancelButton);
   document.body.appendChild(el);
-  button = el;
+  toolbar = el;
   return el;
 }
 
 function showAt(rect: DOMRect): void {
-  const el = ensureButton();
-  const width = el.offsetWidth || 84;
+  const el = ensureToolbar();
+  const width = el.offsetWidth || 150;
   const height = el.offsetHeight || 26;
   const gap = 8;
   const left = Math.min(Math.max(8, rect.right - width), window.innerWidth - width - 8);
@@ -85,28 +122,26 @@ function showAt(rect: DOMRect): void {
   const top = below + height > window.innerHeight - 8 ? Math.max(8, rect.top - height - gap) : below;
   el.style.left = `${Math.round(left)}px`;
   el.style.top = `${Math.round(top)}px`;
-  el.style.display = 'block';
+  el.style.display = 'flex';
 }
 
 function hide(): void {
   pending = null;
-  if (button) button.style.display = 'none';
+  if (toolbar) toolbar.style.display = 'none';
 }
 
 /**
- * 忙态 = 取消键。以前这里会 `disabled = true`，结果就是「想取消却没有入口」——
+ * 忙态 = 只剩一个取消键。以前这里会 `disabled = true`，结果就是「想取消却没有入口」——
  * 按钮变成一句「分析中…」的死字，用户只能干等或刷新页面。
  */
 function setBusy(value: boolean, floor: number | null = null): void {
   busy = value;
   runningFloor = value ? floor : null;
-  if (!button) return;
-  button.textContent = value ? CANCEL_TEXT : IDLE_TEXT;
-  button.disabled = false;
-  // 忙时染成警示色：一眼看出「这个按钮现在会中止任务」，而不是以为还能再点一次
-  button.style.background = value ? 'rgba(180,42,46,.95)' : 'rgba(28,36,44,.94)';
-  button.style.cursor = 'pointer';
-  button.style.opacity = '1';
+  if (!toolbar || !generateButton || !draftButton || !closeButton || !cancelButton) return;
+  generateButton.style.display = value ? 'none' : 'inline-block';
+  draftButton.style.display = value ? 'none' : 'inline-block';
+  closeButton.style.display = value ? 'none' : 'inline-block';
+  cancelButton.style.display = value ? 'inline-block' : 'none';
 }
 
 /** 掐掉当前这一楼的在途分析。重复点击无副作用（abort 幂等）。 */
@@ -139,6 +174,41 @@ async function trigger(): Promise<void> {
     setBusyInfo(null);
     hide();
   }
+}
+
+/**
+ * 「＋ 待生成」：只写池子，不发请求。
+ *
+ * **不打开面板**：这个按钮的语义就是「先攒着」，弹面板等于打断当前阅读。
+ * 但 toast 必须说清「没调 API」——否则在自动模式下，用户会以为它已经在跑了。
+ */
+function parkSelection(): void {
+  const capture = pending;
+  if (!capture || busy) return;
+  const context = getContext();
+  const message = context?.chat?.[capture.messageId];
+  if (!message || typeof message.mes !== 'string') {
+    notify('warning', '找不到这一楼的正文，没法加入待生成');
+    return;
+  }
+  const chatId = context?.getCurrentChatId?.() ?? '';
+  if (!chatId) {
+    notify('warning', '当前没有打开的聊天，没法加入待生成');
+    return;
+  }
+  const anchor = buildSegmentAnchor(chatId, capture, message.mes);
+  const added = addDraft({ chatId, floor: capture.messageId, swipeId: capture.swipeId, segment: anchor });
+  diagnostic('trigger:draft', { floor: capture.messageId, created: added.created, existing: added.existingStatus ?? null });
+
+  if (!added.created) {
+    notify(
+      'info',
+      added.existingStatus === 'pending' ? '这一段已经有候选了，去面板的「待确认」里看' : '这段已经在待生成里了',
+    );
+  } else {
+    notify('info', `已加入待生成（共 ${countDrafts()} 段，尚未调用 API）`);
+  }
+  hide();
 }
 
 /** 选区落定后：能出图就浮按钮，不能就安静地什么都不做。 */
@@ -174,7 +244,7 @@ function settle(): void {
 
 /** 选区之外的地方按下/滚动，就该收起来 —— 否则按钮会飘在屏幕上跟着用户走。 */
 function onDocumentMouseDown(event: MouseEvent): void {
-  if (button && event.target instanceof Node && button.contains(event.target)) return;
+  if (toolbar && event.target instanceof Node && toolbar.contains(event.target)) return;
   if (busy) return;
   hide();
 }
@@ -216,7 +286,7 @@ export function bindSelectionTrigger(options: TriggerOptions = {}): () => void {
   doc.addEventListener('keydown', onKeyDown, true);
   win.addEventListener('scroll', onScroll, true);
 
-  diagnostic('trigger:bound', { buttonId: BUTTON_ID });
+  diagnostic('trigger:bound', { toolbarId: TOOLBAR_ID });
 
   return () => {
     doc.removeEventListener('mouseup', onSettle, true);
@@ -224,8 +294,12 @@ export function bindSelectionTrigger(options: TriggerOptions = {}): () => void {
     doc.removeEventListener('mousedown', onDocumentMouseDown, true);
     doc.removeEventListener('keydown', onKeyDown, true);
     win.removeEventListener('scroll', onScroll, true);
-    button?.remove();
-    button = null;
+    toolbar?.remove();
+    toolbar = null;
+    generateButton = null;
+    draftButton = null;
+    closeButton = null;
+    cancelButton = null;
     pending = null;
     busy = false;
     runningFloor = null;

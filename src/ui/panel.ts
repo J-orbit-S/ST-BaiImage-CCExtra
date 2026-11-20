@@ -11,17 +11,24 @@
  * 编译后带 `data-v-*` 属性选择器，我们的节点没有那个属性。所以这四处用内联样式复刻同样的
  * 几何与变量（36px 圆角按钮、14px/16px 内边距），颜色仍走 `--bbi-*` → 主题照样跟随。
  *
- * 面板里有两块东西：
- *   ① 本插件自己的开关（自动出图 / 需确认 / 显示悬浮球）；
- *   ② 待确认的候选画面（volume 2 的确认式）。候选卡片是纯 DOM 现搭，样式全部走 `--bbi-*`。
+ * 面板里分三块：
+ *   ① 本插件自己的开关（自动出图 / 需确认 / 中文对照 / 显示悬浮球）；
+ *   ② **待生成**：已选段、还没花额度的条目（生成 / 删除，顶部有一键全生成）；
+ *   ③ **待确认**：已经有 tag 的候选（确认 / 重 Roll / 编辑 / 删除）。
+ *
+ * 为什么两区分开而不是混排：两种条目能做的动作不同（draft 只有生成/删除），
+ * 用户的注意力也不同（待生成是「还没花额度的打算」，待确认是「已经花钱买回来的东西」）。
+ * 混排时「待确认 3」会让人以为已有 3 张能确认的图，其实其中两条连 tag 都没有。
  *
  * 代价：面板依赖柏宝绘先加载。没启用时**不做备用样式**（那等于养第二份 CSS 副本，
  * 比依赖更危险），只给一句人话提示。
  */
 
 import { diagnostic } from '@/runner/diagnostic';
+import { countBatchCalls, generateDraft, generateDrafts } from '@/runner/batch';
 import { commitCandidate, rerollCandidate } from '@/runner/commit';
 import {
+  countDrafts,
   countPending,
   editCandidateTag,
   discardCandidate,
@@ -49,20 +56,28 @@ export interface BusyInfo {
   onCancel: () => void;
 }
 
+interface Section {
+  root: HTMLElement;
+  title: HTMLSpanElement;
+  empty: HTMLParagraphElement;
+  list: HTMLDivElement;
+}
+
 interface PanelDom {
   root: HTMLDivElement;
   overlay: HTMLDivElement;
   autoInput: HTMLInputElement;
   confirmInput: HTMLInputElement;
   confirmRow: HTMLElement;
+  zhInput: HTMLInputElement;
   orbInput: HTMLInputElement;
   busyRow: HTMLDivElement;
   busyLabel: HTMLSpanElement;
   cancelButton: HTMLButtonElement;
-  candidatesSection: HTMLElement;
-  candidatesTitle: HTMLSpanElement;
-  candidatesEmpty: HTMLParagraphElement;
-  candidatesList: HTMLDivElement;
+  drafts: Section;
+  /** 一键全生成：只在有待生成时出现，按钮文案里写清要花几次调用。 */
+  bulkButton: HTMLButtonElement;
+  candidates: Section;
 }
 
 let dom: PanelDom | null = null;
@@ -71,7 +86,7 @@ let busyInfo: BusyInfo | null = null;
 let unbindPrefs: (() => void) | null = null;
 let unbindCandidates: (() => void) | null = null;
 let chatHookBound = false;
-/** 正在确认 / 重 Roll 的那一条（同一时刻只允许一个动作，避免连点造出两份写回）。 */
+/** 正在确认 / 重 Roll / 生成的那一条（同一时刻只允许一个动作，避免连点造出两份写回）。 */
 let actionBusy = false;
 /** 正在编辑哪一条，以及编辑中的草稿（重绘列表时必须保留，否则一改就丢字）。 */
 let editingId: string | null = null;
@@ -180,6 +195,36 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string): 
   return node;
 }
 
+function buildSection(emptyText: string, extra?: HTMLElement): Section {
+  const root = el('section');
+  Object.assign(root.style, {
+    marginTop: '18px',
+    paddingTop: '14px',
+    borderTop: '1px solid var(--bbi-line)',
+  } as Partial<CSSStyleDeclaration>);
+
+  const title = el('span', 'bbi-field-label');
+  Object.assign(title.style, {
+    display: 'block',
+    fontWeight: '600',
+    fontSize: '13px',
+    color: 'var(--bbi-ink)',
+    marginBottom: '8px',
+  } as Partial<CSSStyleDeclaration>);
+
+  const empty = el('p', 'bbi-field-hint');
+  empty.textContent = emptyText;
+
+  const list = el('div');
+  list.style.display = 'flex';
+  list.style.flexDirection = 'column';
+
+  // extra（比如「一键生成」按钮）放在标题正下方、列表之前
+  if (extra) root.append(extra);
+  root.append(title, empty, list);
+  return { root, title, empty, list };
+}
+
 function build(): PanelDom {
   const root = document.createElement('div');
   root.id = ROOT_ID;
@@ -260,6 +305,10 @@ function build(): PanelDom {
     '需确认',
     '先出候选 tag，确认后才写进正文——确认即出图，不会再问一次。自动出图开着时此项不可用。',
   );
+  const zh = buildSwitch(
+    '中文对照',
+    '让副 API 在给 tag 的同时多交一份中文直译（只用于看，不参与出图）。关掉可省一点输出长度。',
+  );
   const orb = buildSwitch('显示悬浮球', '关掉后可以从魔术棒菜单（🍃 划线出图）进来这里重新打开。');
 
   // 在途分析的状态行：只在真正跑的时候出现，平时不占地方
@@ -274,35 +323,29 @@ function build(): PanelDom {
   styleSmallButton(cancelButton);
   busyRow.append(busyLabel, cancelButton);
 
-  page.append(auto.row, auto.hint, confirm.row, confirm.hint, orb.row, orb.hint, busyRow);
+  page.append(auto.row, auto.hint, confirm.row, confirm.hint, zh.row, zh.hint, orb.row, orb.hint, busyRow);
 
-  // —— 候选区（确认式）：标题 + 空态 + 列表 ——
-  const candidatesSection = el('section');
-  Object.assign(candidatesSection.style, {
-    marginTop: '18px',
-    paddingTop: '14px',
-    borderTop: '1px solid var(--bbi-line)',
-  } as Partial<CSSStyleDeclaration>);
+  // —— 待生成 ——
+  const bulkButton = document.createElement('button');
+  bulkButton.type = 'button';
+  bulkButton.textContent = '⚡ 一键生成全部';
+  styleSmallButton(bulkButton);
+  bulkButton.style.marginBottom = '10px';
+  bulkButton.style.display = 'none';
+  bulkButton.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    void runAction('一键生成', async () => {
+      await generateDrafts();
+      return { status: 'done', message: '' };
+    });
+  });
+  const drafts = buildSection('没有待生成的选段。划选正文 → 点「＋ 待生成」，可以攒好几段一起生成。', bulkButton);
 
-  const candidatesTitle = el('span', 'bbi-field-label');
-  Object.assign(candidatesTitle.style, {
-    display: 'block',
-    fontWeight: '600',
-    fontSize: '13px',
-    color: 'var(--bbi-ink)',
-    marginBottom: '8px',
-  } as Partial<CSSStyleDeclaration>);
+  // —— 待确认 ——
+  const candidates = buildSection('没有待确认的画面。生成 tag 之后，候选会出现在这里等你确认。');
 
-  const candidatesEmpty = el('p', 'bbi-field-hint');
-  candidatesEmpty.textContent = '没有待确认的画面。划选正文 → 点「生成 tag」，候选会出现在这里。';
-
-  const candidatesList = el('div');
-  candidatesList.style.display = 'flex';
-  candidatesList.style.flexDirection = 'column';
-
-  candidatesSection.append(candidatesTitle, candidatesEmpty, candidatesList);
-
-  page.append(candidatesSection);
+  page.append(drafts.root, candidates.root);
   body.append(page);
   win.append(head, body);
   overlay.append(win);
@@ -314,14 +357,14 @@ function build(): PanelDom {
     autoInput: auto.input,
     confirmInput: confirm.input,
     confirmRow: confirm.row,
+    zhInput: zh.input,
     orbInput: orb.input,
     busyRow,
     busyLabel,
     cancelButton,
-    candidatesSection,
-    candidatesTitle,
-    candidatesEmpty,
-    candidatesList,
+    drafts,
+    bulkButton,
+    candidates,
   };
 }
 
@@ -330,6 +373,7 @@ function syncControls(prefs: Prefs): void {
   if (!dom) return;
   if (dom.autoInput.checked !== prefs.autoGenerate) dom.autoInput.checked = prefs.autoGenerate;
   if (dom.confirmInput.checked !== prefs.confirmTag) dom.confirmInput.checked = prefs.confirmTag;
+  if (dom.zhInput.checked !== prefs.tagZhPreview) dom.zhInput.checked = prefs.tagZhPreview;
   if (dom.orbInput.checked !== prefs.showOrb) dom.orbInput.checked = prefs.showOrb;
 
   // 互锁的 UI 投影。真正的压制在 normalizePrefs 里（状态层），这里只负责「看起来也对」。
@@ -371,7 +415,7 @@ function cardButton(text: string, onClick: () => void, disabled = false): HTMLBu
   return button;
 }
 
-/** 一条候选的动作：串行执行，跑的时候整列按钮禁用（避免连点写两遍）。 */
+/** 一条动作：串行执行，跑的时候整列按钮禁用（避免连点写两遍）。 */
 async function runAction(label: string, fn: () => Promise<{ status: string; message: string }>): Promise<void> {
   if (actionBusy) return;
   actionBusy = true;
@@ -388,7 +432,7 @@ async function runAction(label: string, fn: () => Promise<{ status: string; mess
   }
 }
 
-function buildCard(item: ImageCandidate, ordinal: number): HTMLElement {
+function cardShell(): HTMLElement {
   const card = el('div');
   Object.assign(card.style, {
     border: '1px solid var(--bbi-line)',
@@ -400,7 +444,10 @@ function buildCard(item: ImageCandidate, ordinal: number): HTMLElement {
     flexDirection: 'column',
     gap: '6px',
   } as Partial<CSSStyleDeclaration>);
+  return card;
+}
 
+function cardHead(titleText: string, badgeText: string): HTMLElement {
   const head = el('div');
   Object.assign(head.style, {
     display: 'flex',
@@ -410,14 +457,14 @@ function buildCard(item: ImageCandidate, ordinal: number): HTMLElement {
   } as Partial<CSSStyleDeclaration>);
 
   const title = el('span');
-  title.textContent = `画面 ${String(ordinal + 1).padStart(2, '0')} · 第 ${item.floor} 楼`;
+  title.textContent = titleText;
   Object.assign(title.style, {
     font: '600 12px/1.5 var(--bbi-font-sans)',
     color: 'var(--bbi-ink)',
   } as Partial<CSSStyleDeclaration>);
 
   const badge = el('span');
-  badge.textContent = `待确认 ${item.activeVersion + 1}/${item.versions.length}`;
+  badge.textContent = badgeText;
   Object.assign(badge.style, {
     font: '600 11px/1.4 var(--bbi-font-sans)',
     color: 'var(--bbi-ink-soft)',
@@ -428,9 +475,69 @@ function buildCard(item: ImageCandidate, ordinal: number): HTMLElement {
   } as Partial<CSSStyleDeclaration>);
 
   head.append(title, badge);
+  return head;
+}
+
+/** 一行 tag 文本（英文主体 / 中文对照 / 角色分项都用它）。 */
+function tagLine(text: string, options: { soft?: boolean; mono?: boolean } = {}): HTMLParagraphElement {
+  const p = el('p');
+  p.textContent = text;
+  Object.assign(p.style, {
+    margin: '0',
+    maxHeight: options.soft ? '54px' : '72px',
+    overflowY: 'auto',
+    font: `${options.mono ? '11px' : '12px'}/1.55 var(--bbi-font-sans)`,
+    color: options.soft ? 'var(--bbi-ink-soft)' : 'var(--bbi-ink)',
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
+  } as Partial<CSSStyleDeclaration>);
+  return p;
+}
+
+/** 「待生成」的一条：只有截断的原文 + 两个动作（生成 / 删除）。 */
+function buildDraftCard(item: ImageCandidate, ordinal: number): HTMLElement {
+  const card = cardShell();
+  const head = cardHead(`第 ${item.floor} 楼 · 选段 ${String(ordinal + 1).padStart(2, '0')}`, '待生成');
+
+  const preview = el('p');
+  preview.textContent = item.segments[0]?.text ?? '';
+  Object.assign(preview.style, {
+    margin: '0',
+    // 截断交给 CSS：`slice(0,40)+'…'` 会把 emoji / 组合字切坏
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    font: '12px/1.55 var(--bbi-font-sans)',
+    color: 'var(--bbi-ink)',
+  } as Partial<CSSStyleDeclaration>);
+
+  const row = el('div');
+  Object.assign(row.style, { display: 'flex', gap: '6px', flexWrap: 'wrap' } as Partial<CSSStyleDeclaration>);
+  row.append(
+    cardButton('⚡ 生成 tag', () => void runAction('生成 tag', () => generateDraft(item.imageId)), actionBusy),
+    cardButton(
+      '✕ 删除',
+      () => {
+        discardCandidate(item.imageId);
+        renderCandidates();
+      },
+      actionBusy,
+    ),
+  );
+
+  card.append(head, preview, row);
+  return card;
+}
+
+function buildCard(item: ImageCandidate, ordinal: number): HTMLElement {
+  const card = cardShell();
+  const current = item.versions[item.activeVersion];
+  const head = cardHead(
+    `画面 ${String(ordinal + 1).padStart(2, '0')} · 第 ${item.floor} 楼`,
+    `待确认 ${item.activeVersion + 1}/${item.versions.length}`,
+  );
 
   const editing = editingId === item.imageId;
-  const current = item.versions[item.activeVersion];
 
   if (editing) {
     const area = document.createElement('textarea');
@@ -450,6 +557,9 @@ function buildCard(item: ImageCandidate, ordinal: number): HTMLElement {
     area.addEventListener('input', () => {
       editingText = area.value;
     });
+
+    const hint = el('p', 'bbi-field-hint');
+    hint.textContent = '只改 Base tag；角色分项只读——要改请用「重 Roll」，手改会和角色库的外貌对不上。';
 
     const row = el('div');
     row.style.display = 'flex';
@@ -480,21 +590,38 @@ function buildCard(item: ImageCandidate, ordinal: number): HTMLElement {
       ),
     );
 
-    card.append(head, area, row);
+    card.append(head, area, hint, row);
     return card;
   }
 
-  const tag = el('p');
-  tag.textContent = current.image.tag;
-  Object.assign(tag.style, {
-    margin: '0',
-    maxHeight: '72px',
-    overflowY: 'auto',
-    font: '12px/1.55 var(--bbi-font-sans)',
-    color: 'var(--bbi-ink)',
-    whiteSpace: 'pre-wrap',
-    wordBreak: 'break-word',
-  } as Partial<CSSStyleDeclaration>);
+  if (!current) {
+    // 结构上不该出现（draft 走 buildDraftCard）。真出现了也不白屏，给一句人话
+    card.append(head, tagLine('这一条没有提示词：先点「生成 tag」。', { soft: true }));
+    return card;
+  }
+
+  card.append(head, tagLine(current.image.tag));
+
+  if (current.tagZh) {
+    card.append(tagLine(current.tagZh, { soft: true }));
+  } else {
+    card.append(tagLine('（没有中文对照：模型没给，或你手改过英文。）', { soft: true, mono: true }));
+  }
+
+  // 角色分项：候选阶段必须能看见，否则「先看后插」只看到一半（v0.2.2 修）
+  for (const character of current.image.characters) {
+    const name = el('span');
+    name.textContent = `角色: ${character.name}`;
+    Object.assign(name.style, {
+      font: '600 11px/1.5 var(--bbi-font-sans)',
+      color: 'var(--bbi-ink-soft)',
+      marginTop: '2px',
+    } as Partial<CSSStyleDeclaration>);
+    card.append(name, tagLine(character.tag, { mono: true }));
+  }
+  if (!current.image.characters.length && current.changes.some(change => change.field === 'new')) {
+    card.append(tagLine('这一版没有角色分项（本次建档的角色不在画面里，重 Roll 可能更好）。', { soft: true }));
+  }
 
   const row = el('div');
   Object.assign(row.style, { display: 'flex', gap: '6px', flexWrap: 'wrap' } as Partial<CSSStyleDeclaration>);
@@ -524,30 +651,62 @@ function buildCard(item: ImageCandidate, ordinal: number): HTMLElement {
     ),
   );
 
-  card.append(head, tag, row);
+  card.append(row);
   return card;
 }
 
-/** 重绘候选列表。池子一变、面板一打开、切聊天都会走它。 */
+/** 重绘两个区域。池子一变、面板一打开、切聊天都会走它。 */
 export function renderCandidates(): void {
   if (!dom) return;
-  paintCandidates(dom, listCandidates());
+  paintDrafts(dom, listCandidates({ status: 'draft' }));
+  paintCandidates(dom, listCandidates({ status: 'pending' }));
+}
+
+function paintSection(section: Section, emptyText: string, label: string, count: number, items: ImageCandidate[], build: (item: ImageCandidate, index: number) => HTMLElement): void {
+  section.title.textContent = count ? `${label} ${count}` : label;
+  section.empty.textContent = emptyText;
+  section.empty.style.display = count ? 'none' : 'block';
+  clearNode(section.list);
+  items.forEach((item, index) => {
+    section.list.append(build(item, index));
+  });
+}
+
+function paintDrafts(target: PanelDom, items: ImageCandidate[]): void {
+  // 按钮上写清「几次调用」：这个功能存在的全部理由就是省钱，用户点之前就该知道要花几次
+  if (items.length) {
+    const calls = countBatchCalls(items.map(item => ({ imageId: item.imageId, floor: item.floor, swipeId: item.swipeId })));
+    target.bulkButton.textContent = `⚡ 一键生成全部 ${items.length} 段（${calls} 次调用）`;
+    target.bulkButton.style.display = 'inline-block';
+    target.bulkButton.disabled = actionBusy;
+    target.bulkButton.style.opacity = actionBusy ? '0.5' : '1';
+  } else {
+    target.bulkButton.style.display = 'none';
+  }
+  paintSection(
+    target.drafts,
+    '没有待生成的选段。划选正文 → 点「＋ 待生成」，可以攒好几段一起生成。',
+    '待生成',
+    items.length,
+    items,
+    buildDraftCard,
+  );
 }
 
 function paintCandidates(target: PanelDom, items: ImageCandidate[]): void {
-  target.candidatesTitle.textContent = items.length ? `待确认 ${items.length}` : '待确认';
-  target.candidatesEmpty.style.display = items.length ? 'none' : 'block';
-  clearNode(target.candidatesList);
-
   // 编辑中的那条如果已经不在池子里（比如被别处删了），把编辑态一起清掉
   if (editingId && !items.some(item => item.imageId === editingId)) {
     editingId = null;
     editingText = '';
   }
-
-  items.forEach((item, index) => {
-    target.candidatesList.append(buildCard(item, index));
-  });
+  paintSection(
+    target.candidates,
+    '没有待确认的画面。生成 tag 之后，候选会出现在这里等你确认。',
+    '待确认',
+    items.length,
+    items,
+    buildCard,
+  );
 }
 
 function bindDom(next: PanelDom): void {
@@ -567,6 +726,12 @@ function bindDom(next: PanelDom): void {
     diagnostic('panel:confirmTag', { value });
     updatePrefs({ confirmTag: value });
     if (value) notify('info', '已开启需确认：划线后先生成候选，确认才写入正文并出图');
+  });
+
+  next.zhInput.addEventListener('change', () => {
+    const value = next.zhInput.checked;
+    diagnostic('panel:tagZhPreview', { value });
+    updatePrefs({ tagZhPreview: value });
   });
 
   next.orbInput.addEventListener('change', () => {
@@ -624,7 +789,11 @@ function show(next: PanelDom): void {
   renderCandidates();
   next.overlay.style.display = 'flex';
   opened = true;
-  diagnostic('panel:open', { theme: next.root.dataset.theme, pending: countPending() });
+  diagnostic('panel:open', {
+    theme: next.root.dataset.theme,
+    pending: countPending(),
+    drafts: countDrafts(),
+  });
 }
 
 export function closePanel(): void {

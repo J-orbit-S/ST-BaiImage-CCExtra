@@ -57,7 +57,7 @@ afterEach(() => {
 
 describe('normalizePrefs', () => {
   it('没有输入时给出默认值（自动出图开、需确认关、悬浮球开）', () => {
-    expect(normalizePrefs(undefined)).toEqual({ autoGenerate: true, confirmTag: false, showOrb: true });
+    expect(normalizePrefs(undefined)).toEqual({ autoGenerate: true, confirmTag: false, showOrb: true, tagZhPreview: true });
     expect(normalizePrefs(null)).toEqual(DEFAULT_PREFS);
   });
 
@@ -68,9 +68,9 @@ describe('normalizePrefs', () => {
   });
 
   it('只写了其中一个字段时，其余用默认值补上', () => {
-    expect(normalizePrefs({ autoGenerate: false })).toEqual({ autoGenerate: false, confirmTag: false, showOrb: true });
-    expect(normalizePrefs({ showOrb: false })).toEqual({ autoGenerate: true, confirmTag: false, showOrb: false });
-    expect(normalizePrefs({ confirmTag: true })).toEqual({ autoGenerate: true, confirmTag: false, showOrb: true });
+    expect(normalizePrefs({ autoGenerate: false })).toEqual({ autoGenerate: false, confirmTag: false, showOrb: true, tagZhPreview: true });
+    expect(normalizePrefs({ showOrb: false })).toEqual({ autoGenerate: true, confirmTag: false, showOrb: false, tagZhPreview: true });
+    expect(normalizePrefs({ confirmTag: true })).toEqual({ autoGenerate: true, confirmTag: false, showOrb: true, tagZhPreview: true });
   });
 
   it('字段类型不对（字符串 "false"、数字 0、null）不认，回落默认', () => {
@@ -92,7 +92,7 @@ describe('互锁：自动出图开着时「需确认」一律视为关', () => {
     install();
     updatePrefs({ autoGenerate: false });
     const next = updatePrefs({ confirmTag: true });
-    expect(next).toEqual({ autoGenerate: false, confirmTag: true, showOrb: true });
+    expect(next).toEqual({ autoGenerate: false, confirmTag: true, showOrb: true, tagZhPreview: true });
   });
 
   it('确认式下再打开自动出图：需确认被自动关掉（不会两个都亮）', () => {
@@ -120,7 +120,7 @@ describe('readPrefs', () => {
 
   it('读得出存过的值', () => {
     install({ [PREFS_KEY]: { autoGenerate: false, confirmTag: true, showOrb: false } });
-    expect(readPrefs()).toEqual({ autoGenerate: false, confirmTag: true, showOrb: false });
+    expect(readPrefs()).toEqual({ autoGenerate: false, confirmTag: true, showOrb: false, tagZhPreview: true });
   });
 
   it('宿主里存着非法组合（自动出图开 + 需确认开）时，读出来是纠正后的值', () => {
@@ -138,15 +138,15 @@ describe('updatePrefs', () => {
   it('写入自己的键并触发保存', () => {
     const harness = install();
     const next = updatePrefs({ autoGenerate: false });
-    expect(next).toEqual({ autoGenerate: false, confirmTag: false, showOrb: true });
-    expect(harness.extensionSettings[PREFS_KEY]).toEqual({ autoGenerate: false, confirmTag: false, showOrb: true });
+    expect(next).toEqual({ autoGenerate: false, confirmTag: false, showOrb: true, tagZhPreview: true });
+    expect(harness.extensionSettings[PREFS_KEY]).toEqual({ autoGenerate: false, confirmTag: false, showOrb: true, tagZhPreview: true });
     expect(harness.saved).toBe(1);
   });
 
   it('只改一项时其余保持原值（不是回落到默认）', () => {
     const harness = install({ [PREFS_KEY]: { autoGenerate: false, confirmTag: true, showOrb: false } });
     updatePrefs({ showOrb: true });
-    expect(harness.extensionSettings[PREFS_KEY]).toEqual({ autoGenerate: false, confirmTag: true, showOrb: true });
+    expect(harness.extensionSettings[PREFS_KEY]).toEqual({ autoGenerate: false, confirmTag: true, showOrb: true, tagZhPreview: true });
   });
 
   it('保留键里的未知字段（以后加字段/别的插件写进来的东西不会被抹掉）', () => {
@@ -166,7 +166,7 @@ describe('updatePrefs', () => {
   it('宿主缺失时不抛错，只是这次没记住', () => {
     vi.stubGlobal('window', {});
     expect(() => updatePrefs({ autoGenerate: false })).not.toThrow();
-    expect(updatePrefs({ autoGenerate: false })).toEqual({ autoGenerate: false, confirmTag: false, showOrb: true });
+    expect(updatePrefs({ autoGenerate: false })).toEqual({ autoGenerate: false, confirmTag: false, showOrb: true, tagZhPreview: true });
   });
 
   it('改过之后即使宿主读不到，也不会回弹成默认（否则用户关了自动出图还会被自动点）', () => {
@@ -176,16 +176,16 @@ describe('updatePrefs', () => {
 
     // 模拟切聊天/瞬时不可用：getContext 这一刻拿不到东西
     vi.stubGlobal('window', {});
-    expect(readPrefs()).toEqual({ autoGenerate: false, confirmTag: false, showOrb: true });
+    expect(readPrefs()).toEqual({ autoGenerate: false, confirmTag: false, showOrb: true, tagZhPreview: true });
   });
 
   it('刷新页面（内存清空）后从宿主重新读回上次的选择', () => {
     const harness = install({ [PREFS_KEY]: { autoGenerate: false, confirmTag: true, showOrb: false } });
-    expect(readPrefs()).toEqual({ autoGenerate: false, confirmTag: true, showOrb: false });
+    expect(readPrefs()).toEqual({ autoGenerate: false, confirmTag: true, showOrb: false, tagZhPreview: true });
 
     // 没改过时是真·每次现读：手改 settings.json 立刻生效
     harness.extensionSettings[PREFS_KEY] = { autoGenerate: true, showOrb: false };
-    expect(readPrefs()).toEqual({ autoGenerate: true, confirmTag: false, showOrb: false });
+    expect(readPrefs()).toEqual({ autoGenerate: true, confirmTag: false, showOrb: false, tagZhPreview: true });
   });
 });
 
@@ -197,7 +197,7 @@ describe('onPrefsChange / resetPrefs', () => {
 
     updatePrefs({ autoGenerate: false });
     expect(seen).toHaveLength(1);
-    expect(seen[0]).toEqual({ autoGenerate: false, confirmTag: false, showOrb: true });
+    expect(seen[0]).toEqual({ autoGenerate: false, confirmTag: false, showOrb: true, tagZhPreview: true });
 
     off();
     updatePrefs({ autoGenerate: true });

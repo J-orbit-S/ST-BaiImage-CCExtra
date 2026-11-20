@@ -13,9 +13,8 @@
 
 import { autoTagProfile } from '@/autoTag/prompt';
 import type { CharChange, ImageInsertion } from '@/autoTag/protocol';
-import { buildCapture } from '@/selection/capture';
-import { locateSelection } from '@/selection/locate';
-import { computeSlotShifts, planSelection, type SelectionPlan } from '@/selection/segmentPlan';
+import { relocatePlan, type RelocateOutcome } from '@/selection/relocate';
+import { computeSlotShifts, type SelectionPlan } from '@/selection/segmentPlan';
 import { readPrefs } from '@/state/prefs';
 import {
   BBI_CHAR_EXTRA_KEY,
@@ -24,7 +23,7 @@ import {
   readCharTagFloorDelta,
   recomputeCharTags,
 } from '@/state/charTags';
-import { addCandidateVersion, findCandidate, removeCandidate, type SegmentAnchor } from '@/state/candidates';
+import { addCandidateVersion, findCandidate, removeCandidate } from '@/state/candidates';
 import { migrateImageSlots } from '@/state/imageSlots';
 import { settings } from '@/state/settings';
 import { getContext, isAiStoryMessage, type STMessage } from '@/st/context';
@@ -196,39 +195,8 @@ export async function commitAnalysis(analysis: SelectionAnalysis, opts: CommitOp
   });
 }
 
-export type RelocateOutcome =
-  | { ok: true; plan: SelectionPlan }
-  | { ok: false; reason: 'anchor-lost' | 'empty-target'; detail?: string };
-
-/** 确认/重 Roll 时，用锚点在**当前正文**里重新定位，并造一份新的切片计划。 */
-export function relocatePlan(
-  segments: SegmentAnchor[],
-  raw: string,
-  floor: number,
-  swipeId: number,
-  stripTags: string[],
-): RelocateOutcome {
-  const anchor = segments[0];
-  if (!anchor) return { ok: false, reason: 'anchor-lost', detail: '没有锚点' };
-
-  const located = locateSelection({ raw, domText: anchor.text, before: anchor.before, after: anchor.after });
-  if (!located.ok) {
-    return {
-      ok: false,
-      reason: 'anchor-lost',
-      detail: located.reason === 'ambiguous' ? '这段文字在楼里出现了多次' : '这段文字已经不在正文里了',
-    };
-  }
-
-  const built = buildCapture({ raw, messageId: floor, swipeId, domText: anchor.text, located });
-  if (!built.ok) return { ok: false, reason: 'anchor-lost', detail: built.reason };
-
-  const planned = planSelection(built.capture, raw, stripTags);
-  if (!planned.ok) {
-    return { ok: false, reason: planned.reason === 'empty-target' ? 'empty-target' : 'anchor-lost', detail: planned.detail };
-  }
-  return { ok: true, plan: planned.plan };
-}
+export type { RelocateOutcome };
+export { relocatePlan };
 
 export interface CandidateCommitOptions {
   signal?: AbortSignal;
@@ -247,6 +215,12 @@ export async function commitCandidate(imageId: string, opts: CandidateCommitOpti
   const item = findCandidate(imageId);
   if (!item) return failure(-1, 'candidate-missing', '这条候选已经不在了：可能刚确认过，或者换了聊天');
   const floor = item.floor;
+
+  // draft（待生成）在结构上就没有版本可写。这里拦一句人话，而不是让下面读到 undefined 抛异常
+  const version = item.versions[item.activeVersion];
+  if (!version) {
+    return skip(floor, 'not-generated', '这条还在待生成里，没有提示词：先点「生成 tag」再确认');
+  }
 
   const context = getContext();
   if (!context) return skip(floor, 'missing-context', 'SillyTavern 还没就绪，请稍后重试');
@@ -270,7 +244,6 @@ export async function commitCandidate(imageId: string, opts: CandidateCommitOpti
     return failure(floor, 'anchor-lost', reason);
   }
 
-  const version = item.versions[item.activeVersion];
   // 确认就是出图的许可（§7.2）：确认式下 autoGenerate 被锁为关，这里凭 confirmTag 补上
   const autoGenerate = opts.autoGenerate ?? readPrefs().confirmTag;
 
@@ -318,18 +291,10 @@ export async function rerollCandidate(imageId: string, opts: CandidateCommitOpti
   const swipeId = typeof message.swipe_id === 'number' ? message.swipe_id : 0;
   if (swipeId !== item.swipeId) return skip(floor, 'swipe-changed', '已切换 swipe，这条候选对应的正文不在了');
 
-  const anchor = item.segments[0];
-  const located = locateSelection({
-    raw: message.mes,
-    domText: anchor.text,
-    before: anchor.before,
-    after: anchor.after,
-  });
-  if (!located.ok) {
+  const relocated = relocatePlan(item.segments, message.mes, floor, swipeId, settings.excludes.customStripTags);
+  if (!relocated.ok) {
     return failure(floor, 'anchor-lost', '这段文字已经被改过了，没法重 Roll：请删掉这条候选，重新划线');
   }
-  const built = buildCapture({ raw: message.mes, messageId: floor, swipeId, domText: anchor.text, located });
-  if (!built.ok) return failure(floor, 'anchor-lost', `重 Roll 定位失败（${built.reason}）`);
 
   const taskNote = [
     `这是一次「重 Roll」：只重写第 ${item.index + 1} 张画面的提示词。`,
@@ -337,7 +302,7 @@ export async function rerollCandidate(imageId: string, opts: CandidateCommitOpti
     '- 只输出 1 张（images 数组只有 1 个元素），position 与上次相同。',
   ].join('\n');
 
-  const outcome = await analyzeSelection(built.capture, {
+  const outcome = await analyzeSelection(relocated.plan.capture, {
     signal: opts.signal,
     skipDedupe: true,
     singleImage: true,
@@ -348,7 +313,8 @@ export async function rerollCandidate(imageId: string, opts: CandidateCommitOpti
   const image = outcome.analysis.images[0];
   if (!image) return failure(floor, 'no-image', '模型这次没有给出画面，候选保持原样');
 
-  if (!addCandidateVersion(imageId, image)) {
+  // 中文对照跟着新版本走：留在外层的话，重 Roll 后卡片上的中文会停在上一版
+  if (!addCandidateVersion(imageId, image, outcome.analysis.tagZh[0])) {
     return failure(floor, 'candidate-missing', '这条候选已经不在了，无法保存重 Roll 结果');
   }
   diagnostic('candidate:reroll', { floor, imageId, tagChars: image.tag.length });

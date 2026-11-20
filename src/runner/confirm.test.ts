@@ -87,9 +87,9 @@ interface Harness {
 
 let chatSeq = 0;
 
-function reply(tag = '1girl, doorway, dim light'): string {
+function reply(tag = '1girl, doorway, dim light', tagZh?: string): string {
   return JSON.stringify({
-    images: [{ position: 'P1', tag, size: 'portrait' }],
+    images: [{ position: 'P1', tag, ...(tagZh ? { tagZh } : {}), size: 'portrait' }],
     changes: [
       {
         name: '小雪',
@@ -430,5 +430,42 @@ describe('同一楼多次确认', () => {
 
     expect(listCandidates()).toEqual([]);
     expect(normalizeStore((harness.context.chatMetadata as AnyRecord)[CANDIDATES_KEY]).items).toHaveLength(1);
+  });
+});
+
+describe('中文对照（tagZh）', () => {
+  it('确认式下：模型给的 tagZh 跟着候选进池子', async () => {
+    const harness = install({ replies: [reply('1girl, doorway, dim light', '少女，门口，昏暗的灯光')] });
+    const result = await runSelection(captureOf(MES, 1));
+    expect(result.status).toBe('pending');
+
+    const items = normalizeStore((harness.context.chatMetadata as AnyRecord)[CANDIDATES_KEY]).items;
+    expect(items).toHaveLength(1);
+    expect(items[0].versions[0].tagZh).toBe('少女，门口，昏暗的灯光');
+    // 中文只在候选里：正文里绝不能出现（它是「只给人看」的字段）
+    expect(String(harness.message.mes)).not.toContain('少女，门口');
+  });
+
+  it('重 Roll：新版本带新中文，旧版本的对照保持原样', async () => {
+    const harness = install({
+      replies: [
+        reply('1girl, doorway, dim light', '少女，门口，昏暗的灯光'),
+        reply('1girl, doorway, moonlight', '少女，门口，月光'),
+      ],
+    });
+    await runSelection(captureOf(MES, 1));
+    const imageId = normalizeStore((harness.context.chatMetadata as AnyRecord)[CANDIDATES_KEY]).items[0].imageId;
+
+    const rolled = await rerollCandidate(imageId);
+    expect(rolled.status).toBe('pending');
+
+    const item = normalizeStore((harness.context.chatMetadata as AnyRecord)[CANDIDATES_KEY]).items[0];
+    expect(item.versions).toHaveLength(2);
+    expect(item.versions[0].tagZh).toBe('少女，门口，昏暗的灯光');
+    expect(item.versions[1].tagZh).toBe('少女，门口，月光');
+    expect(item.versions[1].image.tag).toBe('1girl, doorway, moonlight');
+    // 重 Roll 不写正文、不出图
+    expect(String(harness.message.mes)).not.toContain('bbi_image');
+    expect(vi.mocked(autoGenerateSlots)).not.toHaveBeenCalled();
   });
 });

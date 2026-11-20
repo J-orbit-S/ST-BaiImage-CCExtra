@@ -32,6 +32,14 @@ export interface Prefs {
    * 一条完整闭环，中间再插一步确认没有意义，两个勾同时亮着还会自相矛盾。
    */
   confirmTag: boolean;
+  /**
+   * 是否让副 API 顺手交一份 Base tag 的中文对照（只给人看，绝不参与出图）。
+   *
+   * 这是全项目**第二处**与柏宝绘的 messages 偏离（第一处是 source=切片）：
+   * 它会在 taskBlock 里多一句输出要求。默认开，关掉即回到「只差 source」的最保守口径，
+   * 排错时这是第一条退路。记账见 docs/ENGINEERING.md §1 的例外清单。
+   */
+  tagZhPreview: boolean;
   /** 是否显示 🍃 悬浮球。 */
   showOrb: boolean;
 }
@@ -39,6 +47,7 @@ export interface Prefs {
 export const DEFAULT_PREFS: Readonly<Prefs> = Object.freeze({
   autoGenerate: true,
   confirmTag: false,
+  tagZhPreview: true,
   showOrb: true,
 });
 
@@ -78,6 +87,7 @@ export function normalizePrefs(raw: unknown): Prefs {
   return {
     autoGenerate,
     confirmTag,
+    tagZhPreview: asBoolean(source.tagZhPreview, DEFAULT_PREFS.tagZhPreview),
     showOrb: asBoolean(source.showOrb, DEFAULT_PREFS.showOrb),
   };
 }

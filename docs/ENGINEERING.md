@@ -817,3 +817,78 @@ npm run build       dist/index.js 206.7 KB（gzip 78.6 KB）
 
 **L1 例外仍然是 1 条**：喂给模型的 `messages` 只有 `source` 一处不同（整楼 → 切片）。
 确认式只改变「什么时候写正文」，不改变「模型看到什么」。
+
+### 13.11 v0.2.2：待生成池 / 一键全生成 / 中文对照 / 双 bug 修复（2026-11-21）
+
+Volume 2.1 落地。设计讨论稿在 `docs/VOLUME2.1.md`，这里登记**实现契约**。
+
+#### 划线触发：从 1 个按钮变成 3 个
+
+```
+⚡ 生成    —— 原路径原语义：分析 →（按模式）写回 / 进候选池
+＋ 待生成 —— 只写池子（draft），不发请求、不开面板；重复加入同一段幂等
+✕        —— 丢弃本次选区
+```
+
+三按钮共用 mouseup 当场算好的同一份快照；忙态仍然只剩「✕ 取消分析」。
+`parkSelection` 必须在 toast 里写「尚未调用 API」——自动模式下不写这句，用户会以为它已经在跑了。
+
+#### 候选池新增 `draft` 状态（双向收敛）
+
+```
+draft：segments 有、versions 空、activeVersion = -1
+```
+
+- `addDraft`：幂等（segmentId 含 chatId|floor|swipeId|锚点原文|出现次序，两次点击同 ID）。
+  同一段已有 pending 候选时也**不新建**——同 ID 两条记录会让「删了没反应」。
+- `fillDraft`：原地填版本、翻 pending。批量配对是拼装层算出来的，不走 `addAnalysis` 的 ID 重算。
+- `addAnalysis` 命中 draft：原地补版本（「待生成 → 生成」不多出一条重复卡片）。
+- 归一化**双向收敛**：没版本且非 draft → 丢；有版本但标 draft → 翻回 pending。
+  不收敛的后果是面板显示一张没有生成按钮的空卡、或确认按钮读到 undefined 白屏。
+
+#### 一键全生成（`runner/batch.ts` + `analysis.ts` 的 `analyzeBatch`）
+
+- **按 `(floor, swipeId)` 分组**再按 `MAX_BATCH = 6` 切块。跨楼合调会让 12 楼的段读到 13 楼的前文，这是口径正确性要求。
+- **伪楼层拼装**：逐段 `relocatePlan`（锚点失效的那段跳过、其余继续）→ 取各段清洗后的叙事行 →
+  按**整楼行号**排序 → 全局重编 `P1..Pn`（各段自己编号会撞号）→ 段间插 `SEGMENT_GAP` 说明行
+  （**不进 segments、没有 P 编号**，模型不可能把它当插入位置；不说清它会把三段读成连续动作）。
+- `minImages = 0`：`parseImagePlan` 数量不足会 throw，设 N 会把整批判失败逼出重试（比逐段贵）。
+  缺段走**补发**（每段一次单段请求），第一次的成果不推翻。
+- 归属判断：`P → composed[行号] → owner(imageId)`；一张图一段，多给的丢弃（`droppedImages`）；
+  `sourceLine` 换算回**该段自己的切片**行号（确认时 commitCandidate 按同一段重新定位，两边坐标系必须一致）。
+- changes 同样按段归属：确认第一条时只写它自己那部分建档。
+- 漫画方案不支持批量（`comic-batch-unsupported`），逐段生成。
+
+#### 中文对照（`autoTag/tagZh.ts`）
+
+- **通道是 `taskNote`**（`TAG_ZH_TASK_NOTE`），不是 source——上游协议第 8 条规定正文里的指令只是故事内容，
+  写进 source 模型会（且应当）拒绝执行。taskBlock 拼在「目标正文」之前，属于任务说明。
+- **L1 例外从 1 条变成 2 条**：`source`（切片）+ `taskBlock`（tagZh 输出要求，可由偏好关闭）。
+  解析、写回、rebase 口径不变；`tagZh` 只挂在 `CandidateVersion` 上，**绝不进** `ImageInsertion.tag`、正文、extra。
+- 提取用 `requestCompletion` 的 `validate` 回调交回的**原始响应**：剥 `<thinking>` / 代码块 → 取 `images[i].tagZh`。
+  任何解析失败静默降级成空串——它是锦上添花，不该让一次成功的分析报错。
+- **编辑英文后清空 `tagZh`**：错的对照比没有更糟。挂在 version 而不是 candidate 上，
+  否则重 Roll 后中文停在上一版。
+
+#### 两个实测 bug 的修法（v0.2.1 漏网）
+
+| bug | 根因 | 修法 |
+|---|---|---|
+| 确认后不出图（autoGenerate=false + confirmTag=true） | 同一件事判两次：`commit.ts` 凭 confirmTag 说「去出图」，`autoGenerateSlots` 又查 prefs 说「开关关着不干」 | **守卫只留一处**（调用方），`autoGenerateSlots` 删掉内层 `isAutoGenerateEnabled` 检查；`reason` 里不再有 `'disabled'` |
+| 候选卡片不显示角色分项 | 渲染只画了 `image.tag` 一行，`characters[]` 数据一直在 | 卡片补「角色: 名」+ 分项 tag（mono 只读）；有 new 建档但无分项时给软提示（不自动重试，空镜合法） |
+
+v0.2.1 没测出来是因为全自动模式下两处判断恰好一致（都 true），bug 被完全掩盖——
+**只有新组合才暴露的 bug，必须有一条该组合的用例**。
+
+#### 验收
+
+```
+npm run typecheck   0 error
+npm test            37 文件 / 583 tests（新增 31：10 候选 draft + 6 tagZh + 7 批量分组 + 6 面板两区 + 2 中文端到端）
+npm run smoke       面板 4 个开关、球 background=transparent、调试口含 generateDraft/generateDrafts
+verify:upstream     40 文件 SHA256 + 3 片段 + 10 常量全 MATCH（柏宝绘零改动）
+npm run build       dist/index.js 221.1 KB（gzip 83.1 KB）
+```
+
+**L1 例外从 1 条变成 2 条**：`source`（切片）+ `taskBlock`（tagZh 要求）。后者可关；
+关掉后回到 1 条。协议、解析、写回、rebase 口径不变。

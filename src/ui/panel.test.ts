@@ -240,12 +240,12 @@ describe('面板挂载', () => {
 });
 
 describe('开关', () => {
-  it('三个开关的默认状态：自动出图开、需确认关、悬浮球开', async () => {
+  it('四个开关的默认状态：自动出图开、需确认关、中文对照开、悬浮球开', async () => {
     const { shadow } = install();
     await openPanel();
     const boxes = checkboxes(shadow);
-    expect(boxes).toHaveLength(3);
-    expect(boxes.map(box => box.checked)).toEqual([true, false, true]);
+    expect(boxes).toHaveLength(4);
+    expect(boxes.map(box => box.checked)).toEqual([true, false, true, true]);
   });
 
   it('自动出图开着时「需确认」置灰，点不动', async () => {
@@ -273,7 +273,7 @@ describe('开关', () => {
     const { shadow } = install({ prefs: { autoGenerate: false, showOrb: true } });
     await openPanel();
     expect(checkboxes(shadow)[0].checked).toBe(false);
-    expect(checkboxes(shadow)[2].checked).toBe(true);
+    expect(checkboxes(shadow)[3].checked).toBe(true);
   });
 
   it('勾选「自动出图」会把偏好写进我们自己的键', async () => {
@@ -292,7 +292,7 @@ describe('开关', () => {
     const { shadow, extensionSettings } = install({ prefs: { autoGenerate: false, showOrb: true } });
     await openPanel();
 
-    const box = checkboxes(shadow)[2];
+    const box = checkboxes(shadow)[3];
     box.checked = false;
     box.dispatch('change');
 
@@ -402,7 +402,7 @@ describe('候选卡片', () => {
     await openPanel();
     expect(textsIn(shadow, '待确认')).toHaveLength(1);
     expect(
-      textsIn(shadow, '没有待确认的画面。划选正文 → 点「生成 tag」，候选会出现在这里。'),
+      textsIn(shadow, '没有待确认的画面。生成 tag 之后，候选会出现在这里等你确认。'),
     ).toHaveLength(1);
   });
 
@@ -458,5 +458,113 @@ describe('候选卡片', () => {
     const { shadow } = install({ candidates: [candidate({ chatId: 'another-chat' })] });
     await openPanel();
     expect(textsIn(shadow, '画面 01 · 第 3 楼')).toHaveLength(0);
+  });
+});
+
+describe('待生成区域', () => {
+  /** 没有版本的候选 = 待生成（draft）。 */
+  function draftCandidate(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return candidate({ versions: [], activeVersion: -1, status: 'draft', ...overrides });
+  }
+
+  it('draft 卡片长在「待生成」区：出处、原文预览、生成与删除两个动作', async () => {
+    const { shadow } = install({ candidates: [draftCandidate()] });
+    await openPanel();
+
+    expect(textsIn(shadow, '待生成 1').length).toBeGreaterThan(0);
+    expect(textsIn(shadow, '第 3 楼 · 选段 01')).toHaveLength(1);
+    expect(textsIn(shadow, '她推开门。')).toHaveLength(1);
+    expect(buttonsOf(shadow)).toEqual(expect.arrayContaining(['⚡ 生成 tag', '✕ 删除']));
+    // 不该出现在待确认区
+    expect(textsIn(shadow, '画面 01 · 第 3 楼')).toHaveLength(0);
+  });
+
+  it('有待生成时，一键按钮出现并写清调用次数（1 段同楼 = 1 次）', async () => {
+    const { shadow } = install({
+      candidates: [draftCandidate(), draftCandidate({ imageId: 'plan2:0', planId: 'plan2' })],
+    });
+    await openPanel();
+
+    const bulk = panelRoot(shadow)?.findAll(el => el.tagName === 'button' && el.textContent.startsWith('⚡ 一键生成全部'));
+    expect(bulk).toHaveLength(1);
+    expect(bulk?.[0].textContent).toContain('2 段');
+    expect(bulk?.[0].textContent).toContain('1 次调用');
+  });
+
+  it('没有待生成时，一键按钮不出现', async () => {
+    const { shadow } = install({ candidates: [candidate()] });
+    await openPanel();
+
+    const bulk = panelRoot(shadow)?.findAll(el => el.tagName === 'button' && el.textContent.startsWith('⚡ 一键生成全部'));
+    // 按钮常驻 DOM，靠 display 隐藏；没有待生成时必须不可见
+    expect(bulk).toHaveLength(1);
+    expect(bulk?.[0].style.display).toBe('none');
+    expect(textsIn(shadow, '待生成').length).toBeGreaterThan(0);
+  });
+
+  it('跨楼的待生成会写明多次调用（2 楼各 1 段 = 2 次）', async () => {
+    const { shadow } = install({
+      candidates: [draftCandidate(), draftCandidate({ imageId: 'p2:0', planId: 'p2', floor: 9 })],
+    });
+    await openPanel();
+
+    const bulk = panelRoot(shadow)?.findAll(el => el.tagName === 'button' && el.textContent.startsWith('⚡ 一键生成全部'));
+    expect(bulk?.[0].textContent).toContain('2 次调用');
+  });
+
+  it('候选卡片显示中文对照（tagZh 挂在当前版本上）', async () => {
+    const withZh = candidate({
+      versions: [
+        {
+          image: {
+            position: 'P1',
+            sourceLine: 0,
+            tag: '1girl, doorway',
+            nl: '',
+            negative: '',
+            characters: [],
+            size: 'portrait',
+          },
+          changes: [],
+          tagZh: '少女，门口',
+          createdAt: 1,
+        },
+      ],
+    });
+    const { shadow } = install({ candidates: [withZh] });
+    await openPanel();
+
+    expect(textsIn(shadow, '少女，门口')).toHaveLength(1);
+    expect(textsIn(shadow, '（没有中文对照：模型没给，或你手改过英文。）')).toHaveLength(0);
+  });
+
+  it('候选卡片显示角色分项（先看后插必须看得全）', async () => {
+    const withChars = candidate({
+      versions: [
+        {
+          image: {
+            position: 'P1',
+            sourceLine: 0,
+            tag: '1boy, 1girl, embrace',
+            nl: '',
+            negative: '',
+            characters: [
+              { name: '叶均', tag: 'boy, handsome, silver hair' },
+              { name: '陆子慕', tag: 'girl, brown hair' },
+            ],
+            size: 'portrait',
+          },
+          changes: [],
+          createdAt: 1,
+        },
+      ],
+    });
+    const { shadow } = install({ candidates: [withChars] });
+    await openPanel();
+
+    expect(textsIn(shadow, '角色: 叶均')).toHaveLength(1);
+    expect(textsIn(shadow, 'boy, handsome, silver hair')).toHaveLength(1);
+    expect(textsIn(shadow, '角色: 陆子慕')).toHaveLength(1);
+    expect(textsIn(shadow, 'girl, brown hair')).toHaveLength(1);
   });
 });

@@ -4,10 +4,13 @@ import {
   CANDIDATES_KEY,
   addAnalysis,
   addCandidateVersion,
+  addDraft,
   buildSegmentAnchor,
+  countDrafts,
   countPending,
   discardCandidate,
   editCandidateTag,
+  fillDraft,
   findCandidate,
   listCandidates,
   makeSegmentId,
@@ -314,5 +317,128 @@ describe('编辑 / 重 Roll / 删除', () => {
     vi.stubGlobal('window', { SillyTavern: { getContext: () => ({ getCurrentChatId: () => 'c' }) } });
     expect(() => addAnalysis(input(['1girl, tag-a']))).not.toThrow();
     expect(listCandidates()).toEqual([]);
+  });
+});
+
+describe('待生成（draft）', () => {
+  function draftInput(text = SELECTED, floor = 1) {
+    const anchor = buildSegmentAnchor(chatId, capture(text, MES, floor), MES);
+    return { chatId, floor, swipeId: 0, segment: anchor };
+  }
+
+  it('加入待生成：只记选段，没有版本、状态是 draft', () => {
+    const added = addDraft(draftInput());
+    expect(added.created).toBe(true);
+    expect(countDrafts()).toBe(1);
+    expect(countPending()).toBe(0);
+
+    const item = listCandidates({ status: 'draft' })[0];
+    expect(item.status).toBe('draft');
+    expect(item.versions).toHaveLength(0);
+    expect(item.segments[0].text).toBe(SELECTED);
+  });
+
+  it('重复加入同一段是幂等的：同 ID，不新建', () => {
+    const first = addDraft(draftInput());
+    const second = addDraft(draftInput());
+    expect(second.created).toBe(false);
+    expect(second.imageId).toBe(first.imageId);
+    expect(countDrafts()).toBe(1);
+  });
+
+  it('同一段已经有候选（pending）时也不新建：报「已经在候选里」', () => {
+    addAnalysis(input(['1girl, tag-a']));
+    const added = addDraft(draftInput());
+    expect(added.created).toBe(false);
+    expect(added.existingStatus).toBe('pending');
+    expect(countDrafts()).toBe(0);
+  });
+
+  it('fillDraft：原地填上版本并翻成 pending（面板不闪、不重排）', () => {
+    const added = addDraft(draftInput());
+    expect(fillDraft(added.imageId, [{ image: image('1girl, from-draft'), changes: [], tagZh: '少女，草稿', createdAt: 1 }])).toBe(true);
+
+    const item = findCandidate(added.imageId);
+    expect(item?.status).toBe('pending');
+    expect(item?.versions[0].image.tag).toBe('1girl, from-draft');
+    expect(item?.versions[0].tagZh).toBe('少女，草稿');
+    expect(countDrafts()).toBe(0);
+    expect(countPending()).toBe(1);
+    // 同一条记录：ID 没变
+    expect(listCandidates()[0].imageId).toBe(added.imageId);
+  });
+
+  it('fillDraft 给 pending（非 draft）条目返回 false：不覆盖已有候选', () => {
+    addAnalysis(input(['1girl, tag-a']));
+    const item = listCandidates()[0];
+    expect(fillDraft(item.imageId, [{ image: image('x'), changes: [], createdAt: 1 }])).toBe(false);
+    expect(findCandidate(item.imageId)?.versions[0].image.tag).toBe('1girl, tag-a');
+  });
+
+  it('addAnalysis 命中 draft：原地补版本，不多出一条重复卡片', () => {
+    const added = addDraft(draftInput());
+    const before = listCandidates({ status: 'draft' }).length;
+    addAnalysis(input(['1girl, tag-a']));
+    expect(listCandidates()).toHaveLength(before);
+    const item = findCandidate(added.imageId);
+    expect(item?.status).toBe('pending');
+    expect(item?.versions[0].image.tag).toBe('1girl, tag-a');
+  });
+
+  it('tagZh 跟着 addAnalysis 进池子，按张对号', () => {
+    addAnalysis({ ...input(['tag-a', 'tag-b']), tagZh: ['中文甲', '中文乙'] });
+    const items = listCandidates();
+    expect(items[0].versions[0].tagZh).toBe('中文甲');
+    expect(items[1].versions[0].tagZh).toBe('中文乙');
+  });
+
+  it('tagZh 缺项 / 空串：版本上不挂这个字段', () => {
+    addAnalysis({ ...input(['tag-a']), tagZh: ['  '] });
+    const item = listCandidates()[0];
+    expect(item.versions[0].tagZh).toBeUndefined();
+  });
+
+  it('编辑英文后中文对照一起失效（错的对照比没有更糟）', () => {
+    addAnalysis({ ...input(['1girl, tag-a']), tagZh: ['中文甲'] });
+    const item = listCandidates()[0];
+    editCandidateTag(item.imageId, '1girl, edited');
+    expect(findCandidate(item.imageId)?.versions[0].tagZh).toBeUndefined();
+  });
+
+  it('归一化双向收敛：draft 没版本要留、draft 有版本要翻回 pending', () => {
+    const base = {
+      imageId: 'a:0',
+      planId: 'a',
+      chatId: 'chat-1',
+      floor: 1,
+      swipeId: 0,
+      segments: [{ segmentId: 's1', text: 'x', before: '', after: '', startLine: 0, endLine: 0 }],
+      index: 0,
+      activeVersion: -1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const kept = normalizeStore({ v: 1, items: [{ ...base, versions: [], status: 'draft' }] });
+    expect(kept.items).toHaveLength(1);
+    expect(kept.items[0].status).toBe('draft');
+    expect(kept.items[0].activeVersion).toBe(-1);
+
+    const converged = normalizeStore({ v: 1, items: [{ ...base, versions: [{ image: image('1girl'), changes: [], createdAt: 1 }], status: 'draft' }] });
+    expect(converged.items[0].status).toBe('pending');
+    expect(converged.items[0].activeVersion).toBe(0);
+
+    // 非 draft 且没版本：仍然丢掉（确认按钮会读到 undefined）
+    expect(normalizeStore({ v: 1, items: [{ ...base, versions: [], status: 'pending' }] }).items).toHaveLength(0);
+  });
+
+  it('countDrafts / listCandidates({ status }) 把两个区域分开数', () => {
+    addDraft(draftInput());
+    addDraft(draftInput('走廊很安静。'));
+    // 同一段的分析会把对应 draft 原地转 pending（见上一条），所以 draft 剩 1
+    addAnalysis(input(['1girl, tag-a']));
+    expect(countDrafts()).toBe(1);
+    expect(countPending()).toBe(1);
+    expect(listCandidates({ status: 'draft' })).toHaveLength(1);
+    expect(listCandidates({ status: 'pending' })).toHaveLength(1);
   });
 });

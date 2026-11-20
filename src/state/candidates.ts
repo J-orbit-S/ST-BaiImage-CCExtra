@@ -51,10 +51,19 @@ export interface CandidateVersion {
    * 否则同一段一次出两张图时，确认两张会把建档做两遍。
    */
   changes: CharChange[];
+  /** Base tag 的中文对照。缺失 = 模型没给 / 关了这个开关 / 手改过英文后失效。 */
+  tagZh?: string;
   createdAt: number;
 }
 
-export type CandidateStatus = 'pending' | 'committed' | 'discarded';
+/**
+ * `draft` = 已经选段、还没有 tag 的「待生成」。
+ *
+ * 它存在的理由不是「多一个状态」，而是**把消费额度这件事往后挪**：
+ *   划线 → ＋待生成（不花钱）→ 攒够了 → 一次调用出全部 tag → 确认 → 出图
+ * 三种生成模式下 draft 都在（自动/手动模式点「生成」即写回，确认模式转 pending）。
+ */
+export type CandidateStatus = 'draft' | 'pending' | 'committed' | 'discarded';
 
 export interface ImageCandidate {
   /** 稳定 ID：`planId:index`。同一段重跑命中同一个 ID，因此是「追加版本」而不是新建卡片。 */
@@ -114,9 +123,11 @@ function normalizeVersion(raw: unknown): CandidateVersion | null {
   const changes = Array.isArray(raw.changes)
     ? raw.changes.filter((item): item is CharChange => isPlainObject(item) && nonEmptyString(item.name))
     : [];
+  const tagZh = typeof raw.tagZh === 'string' && raw.tagZh.trim() ? raw.tagZh.trim() : undefined;
   return {
     image: raw.image,
     changes,
+    ...(tagZh ? { tagZh } : {}),
     createdAt: Number.isFinite(raw.createdAt) ? (raw.createdAt as number) : Date.now(),
   };
 }
@@ -132,9 +143,18 @@ function normalizeCandidate(raw: unknown): ImageCandidate | null {
   const versions = Array.isArray(raw.versions)
     ? raw.versions.map(normalizeVersion).filter((item): item is CandidateVersion => item !== null)
     : [];
-  if (!versions.length) return null;
-  const status: CandidateStatus =
-    raw.status === 'committed' || raw.status === 'discarded' ? raw.status : 'pending';
+  // ★ 双向收敛，两条都必须有：
+  //   - 没有版本 且不是 draft  → 丢掉。面板确认按钮会读 versions[activeVersion]，
+  //     读到 undefined 就抛异常，整个候选区白屏；宁可丢一条，不让面板白屏。
+  //   - 有版本 且标成 draft  → 收敛回 pending（旧版本/手改留下的脏数据）。
+  //     draft 一旦有 tag 就不再是「待生成」，否则面板会显示一张没有生成按钮的空卡。
+  if (!versions.length && raw.status !== 'draft') return null;
+  // 有版本就一定不是 draft：标成 draft 的脏数据收敛成 pending
+  const status: CandidateStatus = !versions.length
+    ? 'draft'
+    : raw.status === 'committed' || raw.status === 'discarded'
+      ? raw.status
+      : 'pending';
   const active = Number.isInteger(raw.activeVersion) ? (raw.activeVersion as number) : versions.length - 1;
   return {
     imageId: raw.imageId,
@@ -145,7 +165,8 @@ function normalizeCandidate(raw: unknown): ImageCandidate | null {
     segments,
     index: Number.isInteger(raw.index) ? (raw.index as number) : 0,
     versions,
-    activeVersion: active >= 0 && active < versions.length ? active : versions.length - 1,
+    // draft 没有版本，activeVersion 记 -1：任何「读当前版本」的地方拿到它都会立刻发现没东西可读
+    activeVersion: versions.length && active >= 0 && active < versions.length ? active : versions.length - 1,
     status,
     createdAt: Number.isFinite(raw.createdAt) ? (raw.createdAt as number) : Date.now(),
     updatedAt: Number.isFinite(raw.updatedAt) ? (raw.updatedAt as number) : Date.now(),
@@ -215,11 +236,18 @@ export function forgetCandidateCache(): void {
 }
 
 export interface ListOptions {
-  /** 是否连同已确认/已丢弃的一起返回。默认只给待确认。 */
+  /** 是否连同已确认/已丢弃的一起返回。默认只给「待生成 + 待确认」。 */
   includeDone?: boolean;
   /** 只列某楼。默认全部。 */
   floor?: number;
+  /**
+   * 只要某一种状态。面板分两个区域正是靠它 —— 混排会让「待确认 3」这个数字骗人
+   * （用户会以为有 3 张能确认的图，其实其中 2 条还没有 tag）。
+   */
+  status?: 'draft' | 'pending';
 }
+
+const VISIBLE: ReadonlySet<CandidateStatus> = new Set<CandidateStatus>(['draft', 'pending']);
 
 /** 当前聊天里的候选，按楼层、创建时间排序（面板从上到下读起来是「按剧情顺序」）。 */
 export function listCandidates(options: ListOptions = {}): ImageCandidate[] {
@@ -227,7 +255,8 @@ export function listCandidates(options: ListOptions = {}): ImageCandidate[] {
   if (!chatId) return [];
   const items = readStore().items
     .filter(item => item.chatId === chatId)
-    .filter(item => (options.includeDone ? true : item.status === 'pending'))
+    .filter(item => (options.includeDone ? true : VISIBLE.has(item.status)))
+    .filter(item => (options.status === undefined ? true : item.status === options.status))
     .filter(item => (options.floor === undefined ? true : item.floor === options.floor));
   items.sort((left, right) => left.floor - right.floor || left.createdAt - right.createdAt || left.index - right.index);
   return items;
@@ -239,8 +268,14 @@ export function findCandidate(imageId: string): ImageCandidate | null {
   return readStore().items.find(item => item.imageId === imageId && item.chatId === chatId) ?? null;
 }
 
+/** 待确认的条数（有 tag、等点头的那些）。 */
 export function countPending(): number {
-  return listCandidates().length;
+  return listCandidates({ status: 'pending' }).length;
+}
+
+/** 待生成的条数（已选段、还没花额度的那些）。 */
+export function countDrafts(): number {
+  return listCandidates({ status: 'draft' }).length;
 }
 
 /**
@@ -297,6 +332,8 @@ export interface NewCandidateInput {
   /** 已后处理的图，`sourceLine` 为切片内行号。 */
   images: ImageInsertion[];
   changes: CharChange[];
+  /** 与 `images` 同下标的中文对照（缺省 = 全部没有）。只给人看，绝不写回。 */
+  tagZh?: string[];
 }
 
 /** 一次分析里「同一批」的标识：同一楼、同一 swipe、同一组段 = 同一批。 */
@@ -308,8 +345,10 @@ export function makePlanId(input: Pick<NewCandidateInput, 'chatId' | 'floor' | '
 /**
  * 把一次分析的结果放进候选池，返回新增/更新的条目数。
  *
- * 合并规则：同一 `imageId` 仍是待确认 → **追加一版**并切到最新（不是新建卡片）。
- * 已确认/已丢弃的不覆盖，另起一张（用户可能就是想再画一版）。
+ * 合并规则：
+ * - 同一 `imageId` 仍是待确认 → **追加一版**并切到最新（不是新建卡片）；
+ * - 同一 `imageId` 是 **draft** → 原地填上版本、翻成 pending（同一条记录，面板不闪）；
+ * - 已确认/已丢弃的不覆盖，另起一张（用户可能就是想再画一版）。
  */
 export function addAnalysis(input: NewCandidateInput): number {
   const now = Date.now();
@@ -321,14 +360,20 @@ export function addAnalysis(input: NewCandidateInput): number {
     const base = `${planId}:${index}`;
     let imageId = base;
     let existing = store.items.find(item => item.imageId === imageId && item.chatId === input.chatId);
-    for (let suffix = 2; existing && existing.status !== 'pending' && suffix < 50; suffix += 1) {
+    // draft 也要算「可复用」：否则「待生成 → 生成」会多出一条重复卡片
+    for (
+      let suffix = 2;
+      existing && existing.status !== 'pending' && existing.status !== 'draft' && suffix < 50;
+      suffix += 1
+    ) {
       imageId = `${base}#${suffix}`;
       existing = store.items.find(item => item.imageId === imageId && item.chatId === input.chatId);
     }
 
     // 整个 plan 只有第一张带 changes：确认两张时不会把建档做两遍
     const changes = index === 0 ? input.changes : [];
-    const version: CandidateVersion = { image, changes, createdAt: now };
+    const zh = input.tagZh?.[index]?.trim();
+    const version: CandidateVersion = { image, changes, ...(zh ? { tagZh: zh } : {}), createdAt: now };
 
     if (existing === undefined) {
       store.items.push({
@@ -345,6 +390,12 @@ export function addAnalysis(input: NewCandidateInput): number {
         createdAt: now,
         updatedAt: now,
       });
+    } else if (existing.status === 'draft') {
+      existing.versions = [version];
+      existing.activeVersion = 0;
+      existing.status = 'pending';
+      existing.segments = input.segments.map(segment => ({ ...segment }));
+      existing.updatedAt = now;
     } else {
       existing.versions.push(version);
       existing.activeVersion = existing.versions.length - 1;
@@ -358,20 +409,94 @@ export function addAnalysis(input: NewCandidateInput): number {
   return touched;
 }
 
+export interface NewDraftInput {
+  chatId: string;
+  floor: number;
+  swipeId: number;
+  segment: SegmentAnchor;
+}
+
+/**
+ * 「＋ 待生成」：只记下选段，**不发请求、不写正文**。
+ *
+ * 重复加入同一段是幂等的：`segmentId` 里含 chatId / floor / swipeId / 锚点原文 / 出现次序，
+ * 所以两次点击算出同一个 ID，第二次只报「已经在待生成里了」。
+ * 不做成「重复点击就顺手生成」——按钮行为必须可预测。
+ */
+export function addDraft(input: NewDraftInput): {
+  imageId: string;
+  created: boolean;
+  /** 没新建时，同 ID 的那条已经在什么状态（决定给用户哪句话）。 */
+  existingStatus?: CandidateStatus;
+} {
+  const now = Date.now();
+  const segments = [{ ...input.segment }];
+  const planId = makePlanId({ chatId: input.chatId, floor: input.floor, swipeId: input.swipeId, segments });
+  const imageId = `${planId}:0`;
+  const store = readStore();
+  const existing = store.items.find(item => item.imageId === imageId && item.chatId === input.chatId);
+  // 同一段已经有一条（draft 或已生成的 pending）→ 不新建。新建会撞同一个 imageId，
+  // 池子里出现两条同键记录，删掉一条另一条还在，用户会觉得「删了没反应」。
+  if (existing) return { imageId: existing.imageId, created: false, existingStatus: existing.status };
+
+  store.items.push({
+    imageId,
+    planId,
+    chatId: input.chatId,
+    floor: input.floor,
+    swipeId: input.swipeId,
+    segments,
+    index: 0,
+    versions: [],
+    activeVersion: -1,
+    status: 'draft',
+    createdAt: now,
+    updatedAt: now,
+  });
+  writeStore(store);
+  return { imageId, created: true };
+}
+
+/**
+ * 给 draft 填上生成结果，并翻成 pending。
+ *
+ * 为什么不走 `addAnalysis`：批量生成时"模型给的图"与"哪条 draft"的配对是**拼装层算出来的**，
+ * 不是靠 ID 重算。让调用方按 ID 直接填，就不怕段落漂移导致 ID 变化而留下一条空 draft。
+ */
+export function fillDraft(imageId: string, versions: CandidateVersion[]): boolean {
+  if (!versions.length) return false;
+  const store = readStore();
+  const chatId = currentChatId();
+  const item = store.items.find(entry => entry.imageId === imageId && entry.chatId === chatId);
+  if (!item || item.status !== 'draft') return false;
+  item.versions = versions;
+  item.activeVersion = versions.length - 1;
+  item.status = 'pending';
+  item.updatedAt = Date.now();
+  writeStore(store);
+  return true;
+}
+
 /** 重 Roll：给同一张图追加一版并切到最新。返回条目数（找不到 = 0）。 */
-export function addCandidateVersion(imageId: string, image: ImageInsertion): number {
+export function addCandidateVersion(imageId: string, image: ImageInsertion, tagZh?: string): number {
   const store = readStore();
   const chatId = currentChatId();
   const item = store.items.find(entry => entry.imageId === imageId && entry.chatId === chatId);
   if (!item || item.status !== 'pending') return 0;
-  item.versions.push({ image, changes: [], createdAt: Date.now() });
+  const zh = tagZh?.trim();
+  item.versions.push({ image, changes: [], ...(zh ? { tagZh: zh } : {}), createdAt: Date.now() });
   item.activeVersion = item.versions.length - 1;
   item.updatedAt = Date.now();
   writeStore(store);
   return 1;
 }
 
-/** 编辑：直接改当前版本里的 tag 文本，**不重跑 API**（改一两个词不该花额度）。 */
+/**
+ * 编辑：直接改当前版本里的 tag 文本，**不重跑 API**（改一两个词不该花额度）。
+ *
+ * 必须把 `tagZh` 一起清掉：手改英文之后旧中文就不再是对照，而是**错的对照**。
+ * 错的对照比没有对照更糟——用户会照着中文判断「这版不行」，而英文其实已经改对了。
+ */
 export function editCandidateTag(imageId: string, tag: string): boolean {
   const trimmed = tag.trim();
   if (!trimmed) return false;
@@ -379,7 +504,10 @@ export function editCandidateTag(imageId: string, tag: string): boolean {
   const chatId = currentChatId();
   const item = store.items.find(entry => entry.imageId === imageId && entry.chatId === chatId);
   if (!item || item.status !== 'pending') return false;
-  item.versions[item.activeVersion].image.tag = trimmed;
+  const version = item.versions[item.activeVersion];
+  if (!version) return false;
+  version.image.tag = trimmed;
+  delete version.tagZh;
   item.updatedAt = Date.now();
   writeStore(store);
   return true;

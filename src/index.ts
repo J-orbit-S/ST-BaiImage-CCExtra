@@ -21,6 +21,7 @@ import { initGlobalCharTags } from '@/state/globalCharTags';
 import { captureSelection } from '@/selection/capture';
 import { cancelAllSelectionRuns, runSelection } from '@/runner/runSelection';
 import { commitCandidate, rerollCandidate } from '@/runner/commit';
+import { generateDraft, generateDrafts } from '@/runner/batch';
 import { listCandidates } from '@/state/candidates';
 import { diagnostic } from '@/runner/diagnostic';
 import { bindSelectionTrigger } from '@/ui/trigger';
@@ -81,12 +82,15 @@ function start(): void {
     candidates: listCandidates,
     commit: commitCandidate,
     reroll: rerollCandidate,
+    // 待生成：单段 / 一键全生成（排查「一次调用出多段」时用）
+    generateDraft,
+    generateDrafts,
     // 自检：面板是否挂上、球在不在
     isPanelMounted,
     isOrbVisible,
   });
 
-  console.log(`[CCX] ST-BaiImage-CCExtra ${VERSION} 已加载：选中正文 → 点「生成 tag」`);
+  console.log(`[CCX] ST-BaiImage-CCExtra ${VERSION} 已加载：选中正文 → 「⚡ 生成」立刻跑，或「＋ 待生成」先攒着`);
 }
 
 /**

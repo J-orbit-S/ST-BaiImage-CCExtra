@@ -60,7 +60,7 @@ export interface AutoGenerateTarget {
 export interface AutoGenerateOutcome {
   clicked: number;
   /** 没点成的原因（诊断与提示用）。 */
-  reason?: 'disabled' | 'no-seqs' | 'no-message' | 'not-rendered' | 'no-button' | 'floor-regen-only';
+  reason?: 'no-seqs' | 'no-message' | 'not-rendered' | 'no-button' | 'floor-regen-only';
 }
 
 /**
@@ -128,9 +128,17 @@ async function waitForSlots(
 /**
  * 逐个点开目标槽位的生成。任一槽位点不动都不影响其它槽位，
  * 也不回滚正文——tag 已经写对了，用户手动点一下即可。
+ *
+ * ⚠ **这里不再检查「自动出图」开关**（v0.2.2 修）。
+ * 以前这里 `if (!isAutoGenerateEnabled()) return`，而调用方 `writeAndPublish` 已经按
+ * `input.autoGenerate` 决定要不要调它。于是「自动出图关 + 需确认开」这个组合里，
+ * 调用方说「去出图」，这里说「开关关着，不干」——静默不生效，用户以为柏宝绘坏了。
+ * 全自动模式下两个判断恰好都成立，所以这个 bug 藏了一整版才被发现。
+ *
+ * 现在守卫只有一处：`writeAndPublish` 的 `input.autoGenerate`。
+ * 本函数是一个"工具"：拿到明确的目标就执行，不再自己判断意图。
  */
 export async function autoGenerateSlots(target: AutoGenerateTarget): Promise<AutoGenerateOutcome> {
-  if (!isAutoGenerateEnabled()) return { clicked: 0, reason: 'disabled' };
   if (!target.seqs.length) return { clicked: 0, reason: 'no-seqs' };
   if (typeof document === 'undefined') return { clicked: 0, reason: 'no-message' };
 

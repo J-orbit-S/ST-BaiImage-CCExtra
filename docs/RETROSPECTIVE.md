@@ -290,7 +290,7 @@ vendored 文件里写的是 `import { ... } from '@/autoTag/clean'`。若把文�
 
 ---
 
-## 6. 踩过的 19 个坑
+## 6. 踩过的 21 个坑
 
 按「当时有多难发现」排序，不按时间。每一条都写清**现在由谁防住**，因为人记不住，机制能记住。
 
@@ -316,6 +316,8 @@ vendored 文件里写的是 `import { ... } from '@/autoTag/clean'`。若把文�
 | 17 | **同一楼确认第二张图，第一张建的角色档没了** | 楼层增量 `extra.bbiCharChanges` 是「整键替换」。第二张候选的 changes 是空的，`makeCharTagFloorDelta` 返回 `undefined`，而 `applyMessageText` 把 `undefined` 当「**删除该键**」 | 写回时先读旧增量再累加（同一 swipe 才累加） | `confirm.test.ts` 的「两个候选各确认一次」用例钉住 ops 长度 |
 | 18 | 悬浮球去底图后，悬停放大与贴边半隐互相打架 | 两者都想写外层的 `transform`：`translateX(-42%)` 与 `scale(1.18)` 同一个属性，后写的赢 | 外层只负责位移，叶子放进内层 `span`，放大只动内层 | `orb.ts` 的 `setGlyphScale`；`decideDock` 单测仍在管吸附 |
 | 19 | 确认时想复用捕获快照，永远失败 | `planSelection` 第一行是「正文指纹不符即 stale」，而确认发生在几分钟后，正文多半已经变过 | 走 `relocatePlan`：按锚点文本 + 前后 200 字重新定位，再拿当前正文造计划 | `confirm.test.ts` 的「上面多了一段也能插对位置」用例 |
+| 20 | **同一件事判两次，数据源还不同**：确认式下确认完不出图 | `commit.ts` 凭 confirmTag 说「去出图」，`autoGenerateSlots` 又查 prefs 说「开关关着不干」。全自动模式下两处判断恰好一致（都 true），bug 被完全掩盖——只有 autoGenerate=false + confirmTag=true 这个新组合才暴露 | 守卫只留一处（调用方）；`autoGenerateSlots` 删掉内层检查 | `confirm.test.ts` 的「确认才写正文，写完按确认即出图点卡片」+ autoGenerate 测试更新 |
+| 21 | 模型返回的 `characters` 数据一直在，候选卡片却只画 `tag` 一行 | 渲染只画了 Base；「先看后插」只看到一半，确认成了盲点 | 卡片补「角色: 名」分项（只读）；有 new 建档但无分项给软提示 | panel.test.ts 的「候选卡片显示角色分项」用例 |
 
 还有一条不算坑但值得记：**`settle()` 挂在 document 的 mouseup 上，用户正常点按钮也会走到捕获逻辑**，
 于是每次「没选东西」都写一条诊断日志，开着 devtools 会刷屏。改成只在「确实划了东西但没通过校验」时记。
@@ -411,6 +413,46 @@ B 段交回卡片，就必然用当前方案。要真正实现自选方案，只
 ## 10. 变更日志
 
 > 以后每次发版在这里加一节。只写「用户能感知的变化 + 一致性状态」，不写重构细节。
+
+### v0.2.2 — 2026-11-21（待生成池 + 一键全生成 + 中文对照 + 双 bug 修复）
+
+**需求**（用户原话摘要）：
+
+1. 划线两步走：一个按钮立刻生成（原路径），另一个「进入候选」只记选段；
+2. 待生成状态下有「待生成 / 删除」两个操作，攒够了一键全生成，**希望只调一次 API**；
+3. 英文 tag 看着累，要中文对照预览，**同一个副 API 一次完成**；
+4. 实测报两个 bug：候选里没有角色库分项；确认式下确认完不出图。
+
+**决策**：
+
+- 三按钮：`⚡ 生成`（原路径）/ `＋ 待生成`（只记选段，幂等）/ `✕`（丢弃选区）。忙态仍只有取消。
+- 「待生成」做成候选池的第四个状态 `draft`（segments 有、versions 空）。没有另造一套列表——
+  `planId` 本来就不依赖模型输出，draft 与生成后的候选天然同一个 ID，原地变身，面板不闪不重排。
+- 一键全生成 = 伪楼层拼装：逐段重定位 → 按整楼行号排序 → 全局重编 P1..Pn → 段间插说明行 →
+  一次调用。`minImages=0`（数量不足 throw 会把整批判失败），缺段补发单段请求，第一次成果不推翻。
+  跨楼按 `(floor, swipeId)` 分组——这不是优化，是口径正确性。
+- 中文对照走 `taskNote` 而不是 source：上游协议第 8 条规定正文里的指令只是故事内容，
+  写进 source 模型会拒绝执行。**L1 例外从 1 条变 2 条**（source + taskBlock，后者可关）。
+  `tagZh` 只挂在 version 上；编辑英文后清空——错的对照比没有更糟。
+- 角色分项只读不做编辑：手改会和角色库建档的外貌对不上，后续所有图都漂。
+- 一键生成上限 6 段（`MAX_BATCH`）：单次响应太长协议不稳、整批失败代价大。
+
+**改动**：
+
+- 新增：`autoTag/tagZh.ts`（taskNote 常量 + 原始响应提取）、`runner/batch.ts`（分组/切块/编排）、
+  `selection/relocate.ts`（从 commit.ts 提出，分析和写回共用，避免 runner 内 import 环）。
+- `state/candidates.ts`：draft 状态、`addDraft` / `fillDraft` / `countDrafts`、双向收敛归一化、
+  `addAnalysis` 命中 draft 原地补版本、tagZh 进出池子。
+- `runner/analysis.ts`：抽出 `requestPlan` / `loadFloorEnv` 公共层（单段与批量共用，
+  防止两条路径各判一次——坑 20 的形状）；`analyzeBatch`。
+- `ui/trigger.ts`：三按钮；`ui/panel.ts`：待生成 / 待确认两区、一键按钮写明调用次数、
+  中文对照与角色分项渲染；`ui/autoGenerate.ts`：删内层守卫（bug 修复）。
+- 修复：确认式下确认完不出图（坑 20）；候选卡片不显示角色分项（坑 21）。
+
+**验证**：tsc 0 error｜37 文件 / 583 tests（+31）｜verify:upstream 全 MATCH｜dist 221.1 KB（gzip 83.1）｜
+smoke：4 开关、球透明底、调试口含 generateDraft/generateDrafts。
+
+---
 
 ### v0.2.1 — 2026-11-20（确认式：候选 tag 池 + 悬浮球去底图）
 
