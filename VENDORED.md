@@ -106,7 +106,7 @@ CCExtra 采用与上游相同的 `src/autoTag|st|backends|state|api` 目录结�
 | 关口 | 命令 | 当前结果（2026-11-20） |
 |---|---|---|
 | 类型检查 | `npm run typecheck` | 通过，0 error |
-| 测试 | `npm test` | **21 文件 / 350 tests 全过**（338 上游 + 12 自写 Adapter / 黄金哨兵另计） |
+| 测试 | `npm test` | **21 文件 / 350 tests 全过**（334 上游 + 12 Adapter 自测 + 4 黄金哨兵） |
 | 字节一致 | `BAIBAI_UPSTREAM=<上游路径> npm run verify:upstream` | **39 文件 SHA256 + nai 3 片段 + 10 常量全部 MATCH** |
 
 > 排错分界线：**测试挂 = 行为变了**（先看黄金基准是否该更新）；**SHA 不匹配 = 代码被改或换行被转换**；
