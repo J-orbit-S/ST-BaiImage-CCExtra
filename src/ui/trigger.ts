@@ -17,16 +17,22 @@
 
 import { captureSelection, describeCapture, type SelectionCapture } from '@/selection/capture';
 import { isAiStoryMessage, getContext } from '@/st/context';
-import { runSelection } from '@/runner/runSelection';
+import { cancelSelectionRun, runSelection } from '@/runner/runSelection';
 import { diagnostic } from '@/runner/diagnostic';
+import { notify } from '@/ui/notify';
+import { setBusyInfo } from '@/ui/panel';
 
 const BUTTON_ID = 'ccx-select-trigger';
 const IDLE_TEXT = '划线出图';
-const BUSY_TEXT = '分析中…';
+/** 忙态不再是「分析中…」这种死字：这个按钮此刻就是取消键。 */
+const CANCEL_TEXT = '✕ 取消分析';
 
 let button: HTMLButtonElement | null = null;
 let pending: SelectionCapture | null = null;
 let busy = false;
+let cancelling = false;
+/** 正在分析哪一楼。取消按楼层精确掐，不去动别人的在途请求。 */
+let runningFloor: number | null = null;
 let bound = false;
 
 function ensureButton(): HTMLButtonElement {
@@ -55,6 +61,12 @@ function ensureButton(): HTMLButtonElement {
   el.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
+    // 忙的时候这个按钮是「取消」，空闲时才是「划线出图」。
+    // 分支写在 click 里而不是靠 disabled：禁用就点不动，等于把唯一的取消入口藏了。
+    if (busy) {
+      cancel();
+      return;
+    }
     void trigger();
   });
   document.body.appendChild(el);
@@ -81,27 +93,48 @@ function hide(): void {
   if (button) button.style.display = 'none';
 }
 
-function setBusy(value: boolean): void {
+/**
+ * 忙态 = 取消键。以前这里会 `disabled = true`，结果就是「想取消却没有入口」——
+ * 按钮变成一句「分析中…」的死字，用户只能干等或刷新页面。
+ */
+function setBusy(value: boolean, floor: number | null = null): void {
   busy = value;
+  runningFloor = value ? floor : null;
   if (!button) return;
-  button.textContent = value ? BUSY_TEXT : IDLE_TEXT;
-  button.disabled = value;
-  button.style.opacity = value ? '0.75' : '1';
-  button.style.cursor = value ? 'progress' : 'pointer';
+  button.textContent = value ? CANCEL_TEXT : IDLE_TEXT;
+  button.disabled = false;
+  // 忙时染成警示色：一眼看出「这个按钮现在会中止任务」，而不是以为还能再点一次
+  button.style.background = value ? 'rgba(180,42,46,.95)' : 'rgba(28,36,44,.94)';
+  button.style.cursor = 'pointer';
+  button.style.opacity = '1';
+}
+
+/** 掐掉当前这一楼的在途分析。重复点击无副作用（abort 幂等）。 */
+function cancel(): void {
+  if (!busy || cancelling || runningFloor === null) return;
+  cancelling = true;
+  diagnostic('trigger:cancel', { floor: runningFloor });
+  cancelSelectionRun(runningFloor);
 }
 
 async function trigger(): Promise<void> {
   const capture = pending;
   if (!capture || busy) return;
-  setBusy(true);
+  setBusy(true, capture.messageId);
+  // 面板里同步显示一行状态：按钮可能被滚走、或者用户正开着面板
+  setBusyInfo({ label: `正在分析第 ${capture.messageId} 楼…`, onCancel: cancel });
   diagnostic('trigger:click', { floor: capture.messageId, chars: capture.text.length });
   try {
-    await runSelection(capture);
+    const outcome = await runSelection(capture);
+    // runSelection 取消时只返回状态、不弹提示——不补这一句，用户会以为「点了没反应」
+    if (outcome.status === 'aborted') notify('info', '已取消，正文未改动');
   } catch (error) {
     // runSelection 自己把异常转成了 toast；这里只兜住「连 toast 都没来得及」的情况
     console.error('[CCX] 划线出图异常', error);
   } finally {
+    cancelling = false;
     setBusy(false);
+    setBusyInfo(null);
     hide();
   }
 }
@@ -162,7 +195,14 @@ export function bindSelectionTrigger(options: TriggerOptions = {}): () => void {
 
   const onSettle = () => settle();
   const onKeyDown = (event: KeyboardEvent) => {
-    if (event.key === 'Escape') hide();
+    if (event.key !== 'Escape') return;
+    // 忙的时候 Esc 等于「取消」：按钮此刻就是取消键，语义一致。
+    // 空闲时才只是把浮出按钮收起来。
+    if (busy) {
+      cancel();
+      return;
+    }
+    hide();
   };
   const onScroll = () => {
     if (!busy) hide();
@@ -186,6 +226,9 @@ export function bindSelectionTrigger(options: TriggerOptions = {}): () => void {
     button = null;
     pending = null;
     busy = false;
+    runningFloor = null;
+    cancelling = false;
+    setBusyInfo(null);
     bound = false;
   };
 }

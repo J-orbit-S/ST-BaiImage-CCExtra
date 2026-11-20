@@ -18,6 +18,7 @@
  */
 
 import { diagnostic } from '@/runner/diagnostic';
+import { readPrefs, updatePrefs } from '@/state/prefs';
 import { notify } from '@/ui/notify';
 
 /**
@@ -36,13 +37,16 @@ const FLOOR_REGEN_HINT = '本楼';
 const WAIT_TIMEOUT_MS = 5000;
 const POLL_MS = 50;
 
-/** 运行时开关（不落盘、不写柏宝绘 settings——本插件不留配置口子）。 */
-let enabled = true;
+/**
+ * 开关的**唯一真相**是 prefs（面板上那个开关）。这里不留内存副本——
+ * 以前是一个模块内 `let enabled`，面板改了 prefs 之后两边会各说各话，
+ * 出现「面板显示手动、卡片还是被点了」这种最难查的错。
+ */
 export function setAutoGenerate(next: boolean): void {
-  enabled = Boolean(next);
+  updatePrefs({ autoGenerate: Boolean(next) });
 }
 export function isAutoGenerateEnabled(): boolean {
-  return enabled;
+  return readPrefs().autoGenerate;
 }
 
 export interface AutoGenerateTarget {
@@ -126,7 +130,7 @@ async function waitForSlots(
  * 也不回滚正文——tag 已经写对了，用户手动点一下即可。
  */
 export async function autoGenerateSlots(target: AutoGenerateTarget): Promise<AutoGenerateOutcome> {
-  if (!enabled) return { clicked: 0, reason: 'disabled' };
+  if (!isAutoGenerateEnabled()) return { clicked: 0, reason: 'disabled' };
   if (!target.seqs.length) return { clicked: 0, reason: 'no-seqs' };
   if (typeof document === 'undefined') return { clicked: 0, reason: 'no-message' };
 

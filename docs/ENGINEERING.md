@@ -525,7 +525,7 @@ troubleshooting_prefix: "[CCX][AutoTagDebug]"
 
 ```
 npm run typecheck                 0 error
-npm test                         29 文件 / 472 tests 全过
+npm test                         33 文件 / 509 tests 全过
 verify:upstream                  40 文件 SHA256 + 3 片段 + 10 常量全 MATCH
 npm run build                    dist/index.js 单文件（175 KB / gzip 69 KB）
 ```
@@ -633,3 +633,85 @@ npm run build                    dist/index.js 单文件（175 KB / gzip 69 KB�
 
 **边界**：这是全项目**唯一**的 DOM 契约，登记在 `VENDORED.md`「B 段」小节。
 失效结果只是「tag 写好了、图没出来」，不写坏任何数据；柏宝绘代码仍未改一行（`verify:upstream` 全 MATCH）。
+
+### 13.9 v0.2.0：面板 / 魔术棒 / 悬浮球 / 取消（2026-11-20）
+
+**需求**：划完线要不要自动出图，想在面板里选；面板 UI 跟柏宝绘一致；加魔术棒入口；
+加 🍃 悬浮球；并且能取消正在跑的 tag 分析。
+
+#### 先查清三件事，否则方案一定跑偏
+
+1. **柏宝绘自己就有悬浮球和顶栏按钮**（`components/FloatingOrb.vue`、`topbar.ts`）。它的球
+   可拖动、贴边半隐、点击开面板、位置存 `localStorage('bbi.orb.pos.v1')`。所以「悬浮球」不是
+   新概念，是**照它的手感再做一颗**，否则用户两个球用起来不一样。
+2. **它的面板样式挂在 `.bbi-root` + `[data-theme]` 的 CSS 变量上**，UI 活在 `#bbi-app-host`
+   的 open shadow root 里。→ 可以把节点插进同一棵 shadow，样式零复制。
+3. **主题存在 `settings.ui.theme`**（`day/night/pastel/green/st`）。→ 只读跟随，不给自己加主题开关。
+
+#### 面板：插入它的 shadow，而不是自己画一套
+
+| | 做法 | 结论 |
+|---|---|---|
+| A | 插进 `#bbi-app-host`.shadowRoot，节点自带 `class="bbi-root" data-theme=…` | **采用**：样式 100% 一致，它改版自动跟上，零 CSS 复制 |
+| B | 自己建 shadow，把 `theme.css`+`base.css`（803 行）搬过来 | 否决：其中 ~500 行是我们用不到的原子，等于养第二份会漂移的样式 |
+| C | 只摘需要的几十行 CSS | 否决：漂移无法被 `verify:upstream` 发现 |
+
+关键细节（都是踩过才知道的）：
+
+- **`childElementCount > 0` 才算就绪**：它 mount 时先 `shadow.textContent = ''` 再挂内容，
+  早一步插进去会被整棵清掉。
+- **题头的 `.bbi-head` / `.bbi-icon-btn` 拿不到**：那几个类在 `App.vue` 的 `<style scoped>` 里，
+  编译后是 `[data-v-*]` 属性选择器，我们的节点没有那个属性。四处用内联样式复刻同样的几何
+  （36px 圆角按钮、14px/16px 内边距），颜色仍走 `--bbi-*` → 主题照样跟随。
+- **`hidden` 属性压不住 `.bbi-overlay`**：`[hidden]` 只是 UA 的 `display:none`，特异性低于类
+  选择器，显隐必须用内联 `display`。
+- **尺寸不改它任何文件**：`--bbi-win-max-w: 420px`、`--bbi-win-max-h: auto`、`--bbi-page-pad: 20px`
+  覆写在我们自己的根节点上，窗口壳同款、只是窄。
+- **不做备用样式**：没启用柏宝绘就提示一句「请先启用柏宝绘」。养第二份 CSS 比依赖更危险。
+
+#### 偏好：我们自己的键，且只有两项
+
+`extensionSettings['ST-BaiImage-CCExtra'] = { autoGenerate, showOrb }`。这是本插件**唯一**写的配置，
+与「配置全在柏宝绘里改」不冲突——这两项柏宝绘根本没有。写入保留未知字段，脏数据一律回落默认。
+
+**单一真相**：`autoGenerate.ts` 原先有个模块内 `let enabled`，现在改成直接读 prefs。
+两个开关各存一份的后果是「面板显示手动、卡片还是被点了」，属于最难查的一类。
+
+**内存后备**：`getContext()` 在加载顺序/切聊天时会返回 null。若每次都硬读宿主，一次读不到就把
+开关回弹成默认——用户刚关掉自动出图，下一张图又被点。所以写入后置一个内存镜像；
+没改过的人仍然每次现读（手改 settings.json 立刻生效）。
+
+#### 取消：底层早就写好了，只缺 UI
+
+`runSelection(capture, { signal })` 从一开始就支持中止，一路透传到 `fetch`；重试循环每个节点
+都检查 `aborted`；**写回之前有闸**。所以取消不需要新逻辑，只需要三个载体：
+
+| 载体 | 做法 |
+|---|---|
+| 浮出按钮（主） | 忙态从「分析中…」改成红色「✕ 取消分析」，`disabled` 改成**始终可点**（禁用等于把唯一入口藏了） |
+| 面板状态行（次） | 「⏳ 正在分析第 N 楼 \[取消\]」，只在跑的时候出现 |
+| Esc | 忙时 = 取消，空闲时 = 收起按钮 |
+
+**必须补一句提示**：`runSelection` 取消时只返回 `status: 'aborted'`，不弹任何提示。不补
+「已取消，正文未改动」，用户会以为点了没反应。
+
+#### 三处入口
+
+| 入口 | 实现 | 说明 |
+|---|---|---|
+| 魔术棒 | `#extensionsMenu` 注入 `.extension_container > a.list-group-item` | 图标 `fa-leaf`（菜单是图标字体环境，emoji 基线不齐） |
+| 悬浮球 | 自己画的 `div#ccx-orb`，放 **light DOM** | 放 light DOM 是为了比面板更早可用：还没加载完时点球至少能得到一句解释 |
+| Esc | `document` 捕获阶段，仅面板开着时接管 | 不干扰 ST 自己的快捷键 |
+
+#### 验收
+
+```
+npm run typecheck   0 error
+npm test            33 文件 / 509 tests（新增 37：17 偏好 + 13 面板 + 5 悬浮球 + 2 主题）
+npm run smoke       入口/菜单/球/面板全挂上（面板 2 个开关、theme=night）
+verify:upstream     40 文件 SHA256 + 3 片段 + 10 常量全 MATCH（柏宝绘零改动）
+npm run build       dist/index.js 191.5 KB（gzip 74.1 KB）
+```
+
+**边界**：面板依赖 `#bbi-app-host` 这个 id 与 `#extensionsMenu` 的结构，两者都记在
+`VENDORED.md`「B 段」的 DOM 契约表里。失效表现都是「入口点了没反应/面板变宽」，不写坏数据。

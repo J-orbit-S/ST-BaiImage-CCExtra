@@ -141,6 +141,28 @@ v0.1.2 起改为**替用户点卡片上的「生成图片」**（`src/ui/autoGen
 失效时的结果只是「tag 写好了、图没出来」，不会写坏任何数据——所以这条可以接受。
 柏宝绘改版时，只需改 `src/ui/autoGenerate.ts` 顶部两个常量。
 
+### 面板与入口的 DOM 契约（v0.2.0，同一条「借界面不复制界面」的路）
+
+面板不自己画界面：节点插进 `#bbi-app-host` 的 open shadow root，自带
+`class="bbi-root" data-theme=…`，于是 `.bbi-window / .bbi-switch-row / .bbi-checkbox /
+.bbi-field-*` 直接生效（这些在它的**全局** base.css 里）。主题只读 `settings.ui.theme` 跟随。
+
+| 依赖 | 值 | 失效表现 |
+|---|---|---|
+| shadow host | `#bbi-app-host`（`display:contents`，open shadow） | 等 5 秒仍无 → 提示「请先启用柏宝绘」，不做备用样式 |
+| shadow 就绪判定 | `childElementCount > 0` | 早插会被它 mount 时的 `shadow.textContent=''` 清掉 |
+| 主题 | `extensionSettings.baibai_image.ui.theme` ∈ day/night/pastel/green/st | 非法值回落 day |
+| 窗口尺寸 | 覆写 `--bbi-win-max-w/-h`、`--bbi-page-pad` 在**我们自己的根节点**上 | 变量名变了 → 面板退回 880px 宽（能用，只是变宽） |
+| 魔术棒菜单 | `#extensionsMenu` 里追加 `.extension_container > a.list-group-item` | 注入不上 → 菜单里没有条目，球和划线仍可用 |
+
+**为什么不搬一份 CSS**：`theme.css` + `base.css` 共 803 行，其中约 500 行是我们用不到的原子
+（各分页、下拉、滑块…）。搬过来就是第二份会随它改版而漂移的样式，而且漂移 `verify:upstream`
+查不出来（那是逐字校验，不是语义校验）。依赖一个 id，比维护一份副本更可控。
+
+**题头那四个类为什么用内联样式**：`.bbi-head / .bbi-brand-name / .bbi-head-actions /
+.bbi-icon-btn` 写在 `App.vue` 的 `<style scoped>` 里，编译成 `[data-v-*]` 属性选择器，
+我们的节点没有那个属性，类名加上去也不生效。所以用内联复刻同样的几何，颜色仍走 `--bbi-*`。
+
 ### 写回后为什么还要动「楼层图片历史」（v0.1.1，数据层，不是代码差异）
 
 柏宝绘的图片归属是 `extra.bbiImage[swipeId][promptHash][]`，每条记录带 `slotSeq` = 生成时它在
@@ -176,7 +198,7 @@ CCExtra 采用与上游相同的 `src/autoTag|st|backends|state|api` 目录结�
 | 关口 | 命令 | 当前结果（2026-11-20） |
 |---|---|---|
 | 类型检查 | `npm run typecheck` | 通过，0 error |
-| 测试 | `npm test` | **29 文件 / 472 tests 全过**（334 上游 + 12 Adapter + 4 黄金哨兵 + 58 划线取词/坐标 + 15 槽位迁移 + 30 编排/写回 + 9 槽位序号 + 10 自动出图） |
+| 测试 | `npm test` | **33 文件 / 509 tests 全过**（334 上游 + 12 Adapter + 4 黄金哨兵 + 58 划线取词/坐标 + 15 槽位迁移 + 30 编排/写回 + 9 槽位序号 + 10 自动出图 + 17 偏好 + 13 面板 + 5 悬浮球 + 2 主题） |
 | 字节一致 | `BAIBAI_UPSTREAM=<上游路径> npm run verify:upstream` | **40 文件 SHA256 + nai 3 片段 + 10 常量全部 MATCH** |
 | 可构建 | `npm run build` | `dist/index.js` 单文件产物，34 modules |
 
