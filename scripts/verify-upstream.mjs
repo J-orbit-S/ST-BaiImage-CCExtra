@@ -77,6 +77,47 @@ for (const [local, remote, snippets] of naiExtract) {
   }
 }
 
+// 内置提示词常量：settingsDefaults.ts 是脚本生成的，必须每个常量都能在上游逐字找到。
+const defaultsFile = path.join(localSrc, 'state/settingsDefaults.ts');
+if (fs.existsSync(defaultsFile)) {
+  console.log('=== 内置提示词常量逐字核对（settingsDefaults.ts）===');
+  const ours = fs.readFileSync(defaultsFile, 'utf8');
+  const upstreamSettings = fs.readFileSync(path.join(upstreamSrc, 'state/settings.ts'), 'utf8');
+  const names = [...ours.matchAll(/^export const (DEFAULT_[A-Z0-9_]+) = `/gm)].map(m => m[1]);
+  if (names.length !== 10) {
+    console.log(`DIFF!  预期 10 个 DEFAULT_ 常量，实际 ${names.length} 个`);
+    bad++;
+  }
+  for (const name of names) {
+    const block = extractTemplateConst(ours, name);
+    const ok = block !== null && upstreamSettings.includes(block);
+    console.log(`${ok ? 'MATCH  ' : 'DIFF!  '}${name}`);
+    if (!ok) bad++;
+  }
+}
+
+/** 从源码里切出 `export const NAME = \`...\`;` 的完整片段；切不出来返回 null。 */
+function extractTemplateConst(text, name) {
+  const marker = `export const ${name} = `;
+  const start = text.indexOf(marker);
+  if (start < 0) return null;
+  const open = text.indexOf('`', start);
+  if (open < 0) return null;
+  let i = open + 1;
+  while (i < text.length) {
+    if (text[i] === '\\') {
+      i += 2;
+      continue;
+    }
+    if (text[i] === '`') break;
+    i += 1;
+  }
+  if (i >= text.length) return null;
+  let end = i + 1;
+  if (text[end] === ';') end += 1;
+  return text.slice(start, end);
+}
+
 if (bad) {
   console.error(`\n失败：${bad} 处不一致。若上游已升级，请先跑黄金对拍确认协议是否变化，再决定同步。`);
   process.exit(1);

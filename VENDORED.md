@@ -50,12 +50,31 @@
 
 | 文件 | 对应上游 | 提供的最小面 |
 |---|---|---|
-| `src/state/charTags.ts` | `src/state/charTags.ts` | 行 16–27/40–41/86–92 的类型与常量逐字（含 `CHAR_TAG_FIELDS` 与 `BBI_CHAR_EXTRA_KEY`）；运行时函数待 M2 |
-| `src/state/settings.ts` | `src/state/settings.ts` | 仅 `ComfyKind` 类型（行 63）；M2 起补 `extensionSettings` 读取 |
+| `src/state/charTags.ts` | `src/state/charTags.ts` | 行 16–27/40–41/86–92 的类型与常量逐字（含 `CHAR_TAG_FIELDS` 与 `BBI_CHAR_EXTRA_KEY`）；运行时函数待 M2-b |
 
 > 判定原则：**凡是没有内部依赖的薄封装，一律整文件搬运，不留手写 stub**。
 > `src/st/context.ts` 原本是手写 stub，自审时发现 `getContext()` 与上游有细微差异（多了 `globalThis` 兜底、少了 try/catch），
 > 已改为整文件 cp——stub 与上游只要不是同一份代码，就迟早会在某个分支上表现不同。
+
+## Adapter（唯一允许「不是逐字复制」的层）
+
+Adapter 存在的理由：上游 `settings.ts` 是 `reactive<ImageSettings>` 的内存单例，**任何 UI 改动都会整份回写**
+`extensionSettings['baibai_image']`。照搬它 = CCExtra 也持有一份能写柏宝绘配置的对象，
+一旦写错就会覆盖用户的方案与接入点（含明文 key）。因此这一层刻意重写，只保留「读」。
+
+| 文件 | 性质 | 说明 |
+|---|---|---|
+| `src/state/settings.ts` | 手写 Adapter | `settings` 为**只读 Proxy**：每次属性访问当场读 `extensionSettings['baibai_image']`（不缓存 → 柏宝绘改了立刻生效）；`set`/`delete`/`defineProperty` 一律抛错。实现 `activeNaiPlan` / `activeComfyPreset` / `activeComfyPromptSet` / `activeOrientationLock` / `builtinComfyPromptSet`，语义照上游 |
+| `src/state/settingsDefaults.ts` | **脚本生成** | 10 份内置提示词常量，由 `npm run extract:defaults` 从上游按常量逐个抽取，禁止手改 |
+| `src/state/settings.adapter.test.ts` | 自写测试 | 12 条：只读抛错、实时刷新、方案回落、类型不匹配回落、空设置不崩 |
+
+### 为什么提示词常量必须脚本抽取
+
+这 10 份文本合计 549 行 / 92KB，手抄任意一个字走样，「LLM 分析过程与柏宝绘一模一样」就当场失效，
+而且肉眼查不出来。脚本抽取 + `verify:upstream` 反向校验（每个常量必须仍逐字存在于上游）是唯一可靠做法。
+
+> 首版脚本按「连续行区间」抽取，把夹在常量之间的 `UiPrefs`/`ApiChannel` 等接口一起吞了进来（tsc 当场报 8 个错）。
+> 已改为**按常量名逐个扫描模板字符串**——这类错误正是「必须能被机器发现」的典型。
 
 ## 换行符不变量（2026-11-20 自审新增）
 
@@ -85,10 +104,10 @@ CCExtra 采用与上游相同的 `src/autoTag|st|backends|state` 目录结构，
 | 关口 | 命令 | 当前结果（2026-11-20） |
 |---|---|---|
 | 类型检查 | `npm run typecheck` | 通过，0 error |
-| 上游测试 | `npm test` | **8 文件 / 155 tests 全过** |
-| 字节一致 | `BAIBAI_UPSTREAM=<上游路径> npm run verify:upstream` | **16 文件 SHA256 全 MATCH + nai 3 片段 MATCH** |
+| 上游测试 | `npm test` | **9 文件 / 167 tests 全过**（155 上游 + 12 自写 Adapter） |
+| 字节一致 | `BAIBAI_UPSTREAM=<上游路径> npm run verify:upstream` | **16 文件 SHA256 全 MATCH + nai 3 片段 MATCH + 10 份内置提示词逐字 MATCH** |
 
-测试分布：clean 15、protocol 37、rebase 12、imageTagRegex 51、slotPlan 7、size 13、mossLayout 14、context 6。
+测试分布：clean 15、protocol 37、rebase 12、imageTagRegex 51、slotPlan 7、size 13、mossLayout 14、context 6（上游共 155）+ settings.adapter 12（自写）。
 
 > 这三项不是形式，是后续排错的分界线：
 > **测试挂 = 搬运破坏了行为**；**SHA 不匹配 = 有人改了 vendored 文件或换行被转换**；

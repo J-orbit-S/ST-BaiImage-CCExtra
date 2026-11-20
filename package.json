@@ -9,6 +9,7 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "verify:upstream": "node scripts/verify-upstream.mjs",
+    "extract:defaults": "node scripts/extract-defaults.mjs",
     "setup": "npm install --legacy-peer-deps --cache ./.npm-cache"
   },
   "devDependencies": {
