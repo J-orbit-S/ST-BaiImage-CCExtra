@@ -52,6 +52,7 @@ const VENDORED = [
   ['autoTag/slotPlan.ts', 'autoTag/slotPlan.ts'],
   ['st/imageTagRegex.ts', 'st/imageTagRegex.ts'],
   ['st/context.ts', 'st/context.ts'],
+  ['st/messageEdit.ts', 'st/messageEdit.ts'],
   ['backends/size.ts', 'backends/size.ts'],
   ['backends/mossLayout.ts', 'backends/mossLayout.ts'],
   ['autoTag/clean.test.ts', 'autoTag/clean.test.ts'],

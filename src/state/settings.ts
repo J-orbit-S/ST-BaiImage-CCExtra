@@ -512,6 +512,30 @@ export function getTagGenChannel(): ApiChannel | null {
   return readChannels().find(c => c.id === id) ?? null;
 }
 
+/* —— 排除角色闸门（与上游 isCurrentChatExcluded 同口径，只读） —— */
+
+/** 当前单角色聊天的角色名；群聊或未进入聊天时返回 null（群聊不参与排除）。 */
+function currentCharName(): string | null {
+  const ctx = getContext();
+  if (!ctx) return null;
+  if (ctx.groupId) return null; // 群聊：多角色，不按单名排除
+  const idx = ctx.characterId;
+  if (idx === undefined || idx === null || idx === '') return null;
+  const ch = ctx.characters?.[Number(idx)];
+  return ch?.name ?? null;
+}
+
+/**
+ * 当前聊天是否被排除（该角色名在排除名单里）。被排除则本次划线不生成 tag。
+ * 按「名字」匹配：同名的重名卡会被一并排除 —— 与柏宝书/柏宝绘的口径完全一致。
+ */
+export function isCurrentChatExcluded(): boolean {
+  const list = settings.excludes.excludedChars;
+  if (!Array.isArray(list) || !list.length) return false;
+  const name = currentCharName();
+  return name !== null && list.includes(name);
+}
+
 /* 测试进程里自动启用草稿层：上游单测会直接改 settings 构造场景。
    必须放在文件末尾——它依赖上面定义的 BUILTIN_COMFY_ILLUST_ID 等常量。 */
 if (testEnv()) enableSettingsDraft();

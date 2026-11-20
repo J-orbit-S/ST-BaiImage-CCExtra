@@ -1,5 +1,8 @@
 node_modules/
 .npm-cache/
-dist/
 *.log
 .DS_Store
+
+# 构建产物：dist/index.js **要提交**（ST 直接加载它，用户不需要自己编译），
+# 但 sourcemap 不提交——547 KB，只在本地排错时有用。
+dist/*.map

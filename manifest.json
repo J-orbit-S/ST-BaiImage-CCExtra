@@ -1,0 +1,12 @@
+{
+  "display_name": "柏宝绘 · 划线出图",
+  "loading_order": 110,
+  "requires": [],
+  "optional": ["ST-BaiBai-Image"],
+  "js": "dist/index.js",
+  "author": "J-orbit-S",
+  "version": "0.1.0",
+  "homePage": "https://github.com/J-orbit-S/ST-BaiImage-CCExtra",
+  "auto_update": false,
+  "minimum_client_version": "1.12.13"
+}
