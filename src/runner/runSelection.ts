@@ -46,6 +46,7 @@ import { parseImageTags } from '@/st/imageTagRegex';
 import { applyMessageText, type ApplyMessageResult } from '@/st/messageEdit';
 import { getContext, isAiStoryMessage } from '@/st/context';
 import { notify } from '@/ui/notify';
+import { autoGenerateSlots } from '@/ui/autoGenerate';
 import { diagnostic } from './diagnostic';
 import {
   applyPlanPostProcess,
@@ -322,6 +323,9 @@ export async function runSelection(capture: SelectionCapture, opts: RunOptions =
     // —— 写回：CAS（聊天 / 楼层 / swipe 身份一致），正文以「落盘那一刻」为基底现算
     let rebaseNote = '';
     let slotShifts: number[] = [];
+    /** 新 tag 在写回后正文里的槽位序号：自动出图靠它定位卡片（见 ui/autoGenerate.ts）。 */
+    let newSeqs: number[] = [];
+    let totalTags = 0;
     const applied = await applyMessageText(
       floor,
       currentText => {
@@ -336,6 +340,8 @@ export async function runSelection(capture: SelectionCapture, opts: RunOptions =
         // 新 tag 若插在既有 tag 之前，既有 tag 的槽位序号会平移，图片历史就认错人。
         // 这里只算位移，真正迁移在正文写成功之后（写失败就不该动历史）。
         slotShifts = computeSlotShifts(base, built.images.map(image => image.sourceLine));
+        newSeqs = built.seqs;
+        totalTags = parseImageTags(built.text).length;
         return built.text;
       },
       chatId,
@@ -353,6 +359,12 @@ export async function runSelection(capture: SelectionCapture, opts: RunOptions =
       if (moved.changed) {
         console.info(`[CCX] 第 ${floor} 楼已有图的槽位序号后移：${moved.changed} 条记录`);
         diagnostic('runSelection:slotShift', { floor, swipeId, entries: moved.changed, shifts: slotShifts });
+        // 卡片是按迁移前的序号水合的，此刻还认着旧槽位（图会暂时挂错卡）。
+        // 发一条 MESSAGE_UPDATED 让柏宝绘重读 extra —— 它订阅了这个事件。
+        const updated = context?.eventTypes?.MESSAGE_UPDATED;
+        if (updated && context?.eventSource?.emit) {
+          void Promise.resolve(context.eventSource.emit(updated, floor)).catch(() => {});
+        }
       } else if (moved.skipped) {
         diagnostic('runSelection:slotShift', { floor, swipeId, skipped: moved.skipped, shifts: slotShifts });
       }
@@ -365,6 +377,13 @@ export async function runSelection(capture: SelectionCapture, opts: RunOptions =
             ? `已在第 ${floor} 楼插入 ${imagePlan.images.length} 页漫画分镜`
             : `已在第 ${floor} 楼插入 ${imagePlan.images.length} 个生图 tag`,
         );
+        // 替他点一下卡片上的「生成图片」。不 await：卡片渲染最多等 5 秒，
+        // 没等到也只是提示手动点，不该让划线流程挂在这里。
+        if (newSeqs.length) {
+          void autoGenerateSlots({ floor, seqs: newSeqs, totalTags }).catch(error => {
+            diagnostic('autoGenerate:error', { floor, error: String(error) });
+          });
+        }
       } else {
         notify('info', '模型认为这段划线没有值得插图的画面');
       }

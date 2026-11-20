@@ -123,10 +123,23 @@ Windows 下全局 `core.autocrlf=true` 会在 `git checkout` 时把 LF 转成 CR
 （`PublicGenerateResult` 里没有 slot 概念，图不会挂到任何卡片上）。
 如果 CCExtra 自己调它，结果会是「图库里有图、楼层卡片还是待生成」，比不做更糟。
 
-因此 B 段的选择是：**CCExtra 只负责把 tag 写对，出图交给柏宝绘的卡片**（点一下「生成图片」）。
+因此 B 段的选择是：**CCExtra 只负责把 tag 写对，出图交给柏宝绘的卡片**。
 这样画师串、vibe、负面词、并发闸门、落盘、stale 判定全部走柏宝绘原逻辑，零漂移。
-自动出图（柏宝绘的 `autoGenerate` 标记）是它进程内的内存 Map，第三方无法置位——
-这条也不去碰，宁可少一步自动化，也不引入一个只能靠 DOM 点击维持的脆弱链路。
+
+柏宝绘自己的自动出图标记（`floor/autoGenerate.ts` 的内存 Map）第三方无法置位——那是模块私有的。
+v0.1.2 起改为**替用户点卡片上的「生成图片」**（`src/ui/autoGenerate.ts`），走的仍是卡片那条路：
+`decideSeed` → `beginImage` → `generateImage` → `saveImageResult` → `hydrateMessage`。
+
+这一处是**唯一**的 DOM 契约，边界写清楚：
+
+| 依赖 | 值 | 失效表现 |
+|---|---|---|
+| 卡片锚点 | `div[data-bbi-slot]`（顺序 = tag 顺序） | 等不到 → 提示手动点 |
+| 生成按钮 | `.bbi-figure__generate`（在锚点的 open shadow root 里） | 找不到 → 提示手动点 |
+| 按钮文案 | 含「本楼」的是「重新生成本楼」，**排除** | 宁可不出图，也不重跑整楼分析 |
+
+失效时的结果只是「tag 写好了、图没出来」，不会写坏任何数据——所以这条可以接受。
+柏宝绘改版时，只需改 `src/ui/autoGenerate.ts` 顶部两个常量。
 
 ### 写回后为什么还要动「楼层图片历史」（v0.1.1，数据层，不是代码差异）
 
@@ -163,7 +176,7 @@ CCExtra 采用与上游相同的 `src/autoTag|st|backends|state|api` 目录结�
 | 关口 | 命令 | 当前结果（2026-11-20） |
 |---|---|---|
 | 类型检查 | `npm run typecheck` | 通过，0 error |
-| 测试 | `npm test` | **27 文件 / 451 tests 全过**（334 上游 + 12 Adapter + 4 黄金哨兵 + 58 划线取词/坐标 + 15 槽位迁移 + 28 编排/写回） |
+| 测试 | `npm test` | **29 文件 / 472 tests 全过**（334 上游 + 12 Adapter + 4 黄金哨兵 + 58 划线取词/坐标 + 15 槽位迁移 + 30 编排/写回 + 9 槽位序号 + 10 自动出图） |
 | 字节一致 | `BAIBAI_UPSTREAM=<上游路径> npm run verify:upstream` | **40 文件 SHA256 + nai 3 片段 + 10 常量全部 MATCH** |
 | 可构建 | `npm run build` | `dist/index.js` 单文件产物，34 modules |
 

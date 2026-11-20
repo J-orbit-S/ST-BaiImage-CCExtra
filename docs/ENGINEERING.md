@@ -525,7 +525,7 @@ troubleshooting_prefix: "[CCX][AutoTagDebug]"
 
 ```
 npm run typecheck                 0 error
-npm test                         27 文件 / 451 tests 全过
+npm test                         29 文件 / 472 tests 全过
 verify:upstream                  40 文件 SHA256 + 3 片段 + 10 常量全 MATCH
 npm run build                    dist/index.js 单文件（175 KB / gzip 69 KB）
 ```
@@ -589,3 +589,47 @@ npm run build                    dist/index.js 单文件（175 KB / gzip 69 KB�
 **回归测试**：`selection/segmentPlan.test.ts`（涂白保行号、位置 ID 不指向 tag 行、位移计算）、
 `state/imageSlots.test.ts`（ready/stale/pending 机制对照 + 结构不认识不碰）、
 `runner/runSelection.test.ts`（旧 tag 不进模型、原文一字不动、槽位 0→1、没图时不凭空建 `bbiImage`）。
+
+### 13.8 v0.1.2：划线后直接出图（2026-11-20）
+
+**需求**：划完线要再点一次卡片，问「能不能直接出图」。
+
+**先把两条路查清，再选**：
+
+| | 卡片上的「生成图片」 | 公开 `STBaiBaiImage.generate()` |
+|---|---|---|
+| 落盘位置 | `柏宝绘_<角色>/bbi_<hash>_<swipeId>_<promptHash>-<genId>` | 同一个 `uploadImageWithSidecar`，位置相同 |
+| 写 `extra.bbiImage` | ✅ `saveImageResult` | ❌ 公开接口没有 slot 概念 |
+| `meta`（画师串/vibe/采样参数） | ✅ | ❌ 不在 `GenerateResult` 里 |
+| 历史面板 | ✅ `beginImage`/`finishImage` | ❌ |
+| 进度 / 取消 / 重试 UI | ✅ genState | ❌ 要另写一套 |
+| 重水合 | ✅ `hydrateMessage` | ❌ |
+
+公开接口那条的结论是「看起来像、哪一处都不一致」：图在盘上、卡片认不出来、图库详情缺参数。
+自己拿 dataUrl 补 extra 等于**另开一条落盘路径**，正是本项目一直在避免的事。
+
+**实现**（`src/ui/autoGenerate.ts`）：
+
+1. `resolveInjectedSeqs`（`runner/plan.ts`）算每个新 tag 在写回后正文里的槽位序号；
+2. 等 `#chat .mes[mesid=N]` 里的 `div[data-bbi-slot]` 长到 tag 数（轮询 50ms，上限 5s），
+   楼层在 DOM 里但卡片没挂时先 `scrollIntoView` 一次；
+3. 从锚点的 **open shadow root** 里取 `.bbi-figure__generate`，校验文案后 `click()`；
+4. 点不动 → 诊断 + 一句人话（「tag 已写入，请点卡片上的生成图片」），不回滚正文。
+
+**序号为什么不能靠文本配对**：同一段划两次线 → 两条一字不差的 tag，按文本配会配反，
+去点**已有图的那张卡**（点一下只弹提示），该出的那张一直停着。行号规则来自
+`injectImageTags`「在第 N 行之后逐条追加、每条独占一行」，第 j 条的行号 =
+`sourceLine + 1 + 已插入条数`。9 条用例钉住，含「同文本不配反」与 CRLF / 末尾无换行。
+
+**必须躲开的坑**：卡片上另有一个穿同样类名的按钮「按当前方案重新生成本楼」
+（`@click="regenerateFloor"`，会删掉本楼全部 tag 重写）。`pickGenerateButton` 按文案排除，
+`autoGenerate.test.ts` 的 `floor-regen-only` 用例守住。
+
+**补发一次 `MESSAGE_UPDATED`**：槽位迁移改的是 `extra`，卡片是按迁移前的序号水合的，
+此刻还认着旧槽位。迁移成功后补发该事件让柏宝绘重读 extra（它订阅了这个事件）。
+
+**开关**：`CCExtra.setAutoGenerate(false)`，运行时生效、不落盘、不写柏宝绘 settings。
+刷新页面恢复默认开启——本插件仍然一个配置 key 都不写。
+
+**边界**：这是全项目**唯一**的 DOM 契约，登记在 `VENDORED.md`「B 段」小节。
+失效结果只是「tag 写好了、图没出来」，不写坏任何数据；柏宝绘代码仍未改一行（`verify:upstream` 全 MATCH）。

@@ -18,6 +18,7 @@ import {
 import type { AutoTagProfile } from '@/autoTag/prompt';
 import { injectImageTags, type ImageInsertion, type ImagePlan } from '@/autoTag/protocol';
 import { rebaseImagePositions, type RebaseReport } from '@/autoTag/rebase';
+import { parseImageTags } from '@/st/imageTagRegex';
 import { bakeAppearance, comicAppearance } from '@/backends/mossLayout';
 import {
   CHAR_TAG_FIELDS,
@@ -210,10 +211,56 @@ export type WritebackBuild =
       text: string;
       /** 换算到 currentText 行号后的插入点（迁移既有 tag 的槽位序号时要用）。 */
       images: ImageInsertion[];
+      /**
+       * 每个新 tag 在**写回后正文**里的槽位序号（0 基），与 `images` 同序。
+       * 自动出图靠它定位卡片；算不出确切位置时为空数组（宁可不出图，也不点错卡）。
+       */
+      seqs: number[];
       mode: 'direct' | 'rebased';
       report?: RebaseReport;
     }
   | { ok: false; reason: 'position-lost' | 'rebase-failed' | 'inject-failed' };
+
+/**
+ * 算出新插入的 tag 各自落在写回后正文的第几个槽位。
+ *
+ * 不能靠「文本相同就是同一个」来配对：同一楼里出现两条一模一样的 tag（对同一段划两次线）
+ * 时 pair 会配反，结果是**点了别人的卡片**——那张卡已经有图，点了只会跳出提示，
+ * 而真正该出的那张一直停在待生成。
+ *
+ * 所以走行号：`injectImageTags` 的规则是「在第 sourceLine 行之后逐条追加 eol + tag」，
+ * 每条独占一行。因此第 j 条新 tag 的行号 = sourceLine + 1 + 它之前已插入的条数。
+ * 再用「该行之前有多少个 tag」得到序号——用的是与 `parseImageTags` 同一个正则，
+ * 一行里写两个 tag 也不会错位。
+ */
+export function resolveInjectedSeqs(text: string, images: ImageInsertion[]): number[] {
+  if (!images.length) return [];
+  const lines = text.split('\n').map(line => line.replace(/\r$/, ''));
+
+  // 每行之前的 tag 数（前缀和）；同时记下该行是否含 tag，用来校验落点
+  const tagsBefore: number[] = [];
+  let seen = 0;
+  for (const line of lines) {
+    tagsBefore.push(seen);
+    seen += parseImageTags(line).length;
+  }
+
+  const order = images
+    .map((image, index) => ({ image, index }))
+    .sort((a, b) => a.image.sourceLine - b.image.sourceLine || a.index - b.index);
+
+  // 结果按**入参顺序**放回：调用方拿 seqs[i] 配 images[i]，顺序错了就会点错卡
+  const seqs: number[] = new Array(images.length).fill(-1);
+  let inserted = 0;
+  for (const { image, index } of order) {
+    const line = image.sourceLine + 1 + inserted;
+    // 落点必须是「含 tag 的行」，否则说明行号推算与注入规则已经不一致——整批放弃
+    if (line >= lines.length || !parseImageTags(lines[line]).length) return [];
+    seqs[index] = tagsBefore[line];
+    inserted += 1;
+  }
+  return seqs;
+}
 
 /**
  * 写回构造：把「切片内行号」的 images 落到 `currentText`（整楼现文）上。
@@ -231,10 +278,12 @@ export function buildWritebackText(
   const resolved = resolveWriteback(plan, currentText, images, stripTags);
   if (!resolved.ok) return { ok: false, reason: resolved.reason };
   try {
+    const text = injectImageTags(currentText, resolved.images);
     return {
       ok: true,
-      text: injectImageTags(currentText, resolved.images),
+      text,
       images: resolved.images,
+      seqs: resolveInjectedSeqs(text, resolved.images),
       mode: resolved.mode,
       report: resolved.report,
     };

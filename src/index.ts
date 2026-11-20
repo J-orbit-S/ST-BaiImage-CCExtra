@@ -20,6 +20,7 @@ import { captureSelection } from '@/selection/capture';
 import { cancelAllSelectionRuns, runSelection } from '@/runner/runSelection';
 import { diagnostic } from '@/runner/diagnostic';
 import { bindSelectionTrigger } from '@/ui/trigger';
+import { isAutoGenerateEnabled, setAutoGenerate } from '@/ui/autoGenerate';
 import { getContext } from '@/st/context';
 
 const VERSION = typeof __CCX_VERSION__ === 'string' ? __CCX_VERSION__ : 'dev';
@@ -53,6 +54,10 @@ function start(): void {
     capture: captureSelection,
     run: runSelection,
     cancelAll: cancelAllSelectionRuns,
+    // 自动出图的运行时开关（不落盘、不写柏宝绘设置）：`CCExtra.setAutoGenerate(false)` 后
+    // 只写 tag 不点卡片，刷新页面即恢复默认开启。
+    setAutoGenerate,
+    isAutoGenerateEnabled,
   });
 
   console.log(`[CCX] ST-BaiImage-CCExtra ${VERSION} 已加载：选中正文 → 点「划线出图」`);

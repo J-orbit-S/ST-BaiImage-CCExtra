@@ -13,6 +13,15 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+// 自动出图要摸 DOM 并轮询等卡片，端到端里换成记录器：既不让它空转 5 秒，
+// 也顺便钉住「写回后按哪个槽位序号去点」——序号错了会去点别人的卡片。
+vi.mock('@/ui/autoGenerate', () => ({
+  autoGenerateSlots: vi.fn(async () => ({ clicked: 1 })),
+  setAutoGenerate: vi.fn(),
+  isAutoGenerateEnabled: () => true,
+}));
+
+import { autoGenerateSlots } from '@/ui/autoGenerate';
 import { buildCapture, type SelectionCapture } from '@/selection/capture';
 import { runSelection } from '@/runner/runSelection';
 import { disableSettingsDraft, enableSettingsDraft, SETTINGS_KEY } from '@/state/settings';
@@ -364,5 +373,32 @@ describe('楼里已有生图 tag', () => {
     const harness = install({ reply: REPLY, mes: FLOOR, extra: {} });
     await runSelection(captureOf(FLOOR, 1, '走廊很安静。'));
     expect(harness.message.extra as AnyRecord).not.toHaveProperty('bbiImage');
+  });
+
+  it('新 tag 插在旧 tag 上方时，自动出图点第 0 个槽位（旧卡被挤到第 1 个）', async () => {
+    const harness = install({ reply: REPLY, mes: FLOOR, extra: storeWithOldImage() });
+    vi.mocked(autoGenerateSlots).mockClear();
+
+    await runSelection(captureOf(FLOOR, 1, '走廊很安静。'));
+    // fire-and-forget：让它的一轮微任务跑完再断言
+    await Promise.resolve();
+
+    expect(vi.mocked(autoGenerateSlots)).toHaveBeenCalledTimes(1);
+    const target = vi.mocked(autoGenerateSlots).mock.calls[0][0];
+    expect(target.floor).toBe(1);
+    expect(target.seqs).toEqual([0]);
+    // 写回后本楼共 2 个 tag：新插进来的 + 旧的那个
+    expect(target.totalTags).toBe(2);
+    expect(harness.message.mes).toContain(OLD_TAG);
+  });
+
+  it('新 tag 插在旧 tag 下方时，自动出图点第 1 个槽位（旧卡还占着第 0 个）', async () => {
+    const harness = install({ reply: REPLY, mes: FLOOR, extra: storeWithOldImage() });
+    vi.mocked(autoGenerateSlots).mockClear();
+
+    await runSelection(captureOf(FLOOR, 1, '“你回来了。”'));
+    await Promise.resolve();
+
+    expect(vi.mocked(autoGenerateSlots).mock.calls[0][0].seqs).toEqual([1]);
   });
 });
