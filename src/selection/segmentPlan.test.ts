@@ -3,7 +3,7 @@ import { injectImageTags, type ImageInsertion } from '@/autoTag/protocol';
 import type { SelectionCapture } from '@/selection/capture';
 import { hashText } from '@/selection/hash';
 import { countLines, expandToLineBounds } from '@/selection/locate';
-import { lineIndexAt, planSelection, resolveWriteback, toAbsoluteImages } from '@/selection/segmentPlan';
+import { lineIndexAt, maskImageTags, computeSlotShifts, planSelection, resolveWriteback, toAbsoluteImages } from '@/selection/segmentPlan';
 
 /** 造一份捕获快照：直接给原文区间，跳过 DOM，但保留「扩到整行」这一步（与真实捕获一致）。 */
 function captureOf(mes: string, start: number, end: number): SelectionCapture {
@@ -169,5 +169,76 @@ describe('resolveWriteback — 正文被改过时回落 rebase', () => {
     if (!planned.ok) throw new Error('unreachable');
     const resolved = resolveWriteback(planned.plan, '   \n\n  ', [imageAt(0)], []);
     expect(resolved).toMatchObject({ ok: false, reason: 'rebase-failed' });
+  });
+});
+
+/**
+ * 2026-11-20 用户实测反馈：楼里已有 `<bbi_image>` 时划线出图，模型会「识别到」旧 tag，
+ * 把它的提示词当成正文抄进新 tag；同时因为新 tag 插在旧 tag 之前，旧图的槽位序号被挤动，
+ * 卡片显示成「旧提示词」、旧图被新卡顶掉。
+ *
+ * 这一组钉住的是前一半：旧 tag 必须**不进模型、也不打乱坐标**。
+ * 后一半（槽位迁移）在 state/imageSlots.test.ts 与 runSelection.test.ts。
+ */
+describe('既有生图 tag：涂白不删行（行号是一切坐标的基准）', () => {
+  const OLD = '<bbi_image>1girl, doorway<size>portrait</size></bbi_image>';
+  const mes = ['第一段。', OLD, '她推开门，灯闪了一下。', '“你回来了。”'].join('\n');
+
+  it('maskImageTags 只涂白：长度、换行、行数一个都不变', () => {
+    const masked = maskImageTags(mes);
+    expect(masked.length).toBe(mes.length);
+    expect(masked.split('\n')).toHaveLength(mes.split('\n').length);
+    expect(masked).not.toContain('bbi_image');
+    expect(masked).not.toContain('1girl');
+    // 行文本只剩正文
+    expect(masked.split('\n')[0]).toBe('第一段。');
+    expect(masked.split('\n')[1].trim()).toBe('');
+    expect(masked.split('\n')[2]).toBe('她推开门，灯闪了一下。');
+  });
+
+  it('落单的半截标签也涂掉（AI 只写了一半时不能留给模型看）', () => {
+    expect(maskImageTags('前文</bbi_image>后文')).not.toContain('bbi_image');
+    expect(maskImageTags('前文</bbi_image>后文')).toHaveLength('前文</bbi_image>后文'.length);
+  });
+
+  it('切片含旧 tag 时，目标文本里没有它，也不会生成指向那一行的位置 ID', () => {
+    const start = mes.indexOf('第一段');
+    // 只选到 tag 那一行的行尾（再往下一格就会被「扩到整行」带上下一段）
+    const end = mes.indexOf('她推开门') - 1;
+    const outcome = planSelection(captureOf(mes, start, end), mes, []);
+    if (!outcome.ok) throw new Error('unreachable');
+
+    expect(outcome.plan.promptText).not.toContain('bbi_image');
+    expect(outcome.plan.promptText).not.toContain('1girl');
+    // 只剩正文那一行一个段，tag 行被过滤掉
+    expect(outcome.plan.sliceSegments).toHaveLength(1);
+    expect(outcome.plan.promptText).toContain('第一段。');
+    // 行号照旧（0 = 整楼第一行），没有被涂白/过滤挤动
+    expect(outcome.plan.absoluteSegments[0].sourceLine).toBe(0);
+    // 含 tag 不再被误判成「切片与整楼清洗口径分歧」
+    expect(outcome.plan.divergent).toBe(false);
+  });
+
+  it('切片不含 tag 时行为不变（tag 在楼下，模型看不见也照旧）', () => {
+    const start = mes.indexOf('她推开门');
+    const outcome = planSelection(captureOf(mes, start, start + 5), mes, []);
+    if (!outcome.ok) throw new Error('unreachable');
+    expect(outcome.plan.promptText).not.toContain('bbi_image');
+    expect(outcome.plan.absoluteSegments[0].sourceLine).toBe(2);
+  });
+
+  it('computeSlotShifts：插入点在既有 tag 之前才需要后移', () => {
+    // mes 的 tag 在第 1 行
+    expect(computeSlotShifts(mes, [0])).toEqual([1]); // 插在上方 → 旧 tag 后移 1
+    expect(computeSlotShifts(mes, [2])).toEqual([0]); // 插在下方 → 不动
+    expect(computeSlotShifts(mes, [1])).toEqual([0]); // 与 tag 同行 → 追加在其后，不动
+    expect(computeSlotShifts(mes, [0, 0])).toEqual([2]); // 上方插两个 → 后移 2
+  });
+
+  it('computeSlotShifts：多条既有 tag 各自算自己的位移', () => {
+    const two = ['甲。', OLD, '乙。', OLD, '丙。'].join('\n');
+    // tag 在第 1、3 行；插入点第 2 行 → 第一条后移 0，第二条后移 1
+    expect(computeSlotShifts(two, [2])).toEqual([0, 1]);
+    expect(computeSlotShifts(two, [0])).toEqual([1, 1]);
   });
 });

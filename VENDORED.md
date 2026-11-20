@@ -128,6 +128,30 @@ Windows 下全局 `core.autocrlf=true` 会在 `git checkout` 时把 LF 转成 CR
 自动出图（柏宝绘的 `autoGenerate` 标记）是它进程内的内存 Map，第三方无法置位——
 这条也不去碰，宁可少一步自动化，也不引入一个只能靠 DOM 点击维持的脆弱链路。
 
+### 写回后为什么还要动「楼层图片历史」（v0.1.1，数据层，不是代码差异）
+
+柏宝绘的图片归属是 `extra.bbiImage[swipeId][promptHash][]`，每条记录带 `slotSeq` = 生成时它在
+楼里是第几个 tag（`floor/storage.ts` 的 `entrySeq` / `historyEntries`）。卡片水合时按
+`(promptHash, 该 tag 现在的序号)` 去查：
+
+| 查到 | 查不到但同序号有别的 hash | 都没有 |
+|---|---|---|
+| ready（显示那张图） | stale（顶着别人的图 +「旧提示词」角标） | pending（待生成） |
+
+本插件会把新 tag 插在划线之后。**若插入点在既有 tag 之前**，那条既有 tag 的序号从 N 变 N+1，
+历史还记在 N 上 → 旧卡退回 pending（图被顶掉）、新卡认领旧图并标「旧提示词」。
+柏宝绘没有「在楼中间手插 tag」的入口，所以它不需要处理这件事；我们的核心用法恰恰需要。
+
+因此 `src/state/imageSlots.ts` 在**正文写成功之后**把受影响的 `slotSeq` 一起后移：
+
+- 只改 `slotSeq` 一个字段，其余字段与条目集合原样保留；
+- 结构不认识（没有 `bbiImage` / 桶不是数组 / 条目不是对象）→ **跳过并记日志**，绝不重建；
+- 写回用与上游 `mutateStore` 同款 CAS（引用比对 + `saveChat`，最多 3 轮）；
+- 正文没写成功就不迁移——否则序号被挪、tag 却没多，旧卡反而丢图。
+
+**这不构成「第三处分析链路差异」**：分析用的 source 与 rebase 基底仍是那两处；
+这里动的是楼层数据（柏宝绘自己每次出图也在写同一份），不改它任何一行代码。
+
 
 
 vendored 文件里的 import 用的是 `@/autoTag/clean` 这类路径。为保证**逐字复制后 import 一个字都不用改**，
@@ -139,7 +163,7 @@ CCExtra 采用与上游相同的 `src/autoTag|st|backends|state|api` 目录结�
 | 关口 | 命令 | 当前结果（2026-11-20） |
 |---|---|---|
 | 类型检查 | `npm run typecheck` | 通过，0 error |
-| 测试 | `npm test` | **26 文件 / 425 tests 全过**（334 上游 + 12 Adapter + 4 黄金哨兵 + 52 划线取词 + 23 编排/写回） |
+| 测试 | `npm test` | **27 文件 / 451 tests 全过**（334 上游 + 12 Adapter + 4 黄金哨兵 + 58 划线取词/坐标 + 15 槽位迁移 + 28 编排/写回） |
 | 字节一致 | `BAIBAI_UPSTREAM=<上游路径> npm run verify:upstream` | **40 文件 SHA256 + nai 3 片段 + 10 常量全部 MATCH** |
 | 可构建 | `npm run build` | `dist/index.js` 单文件产物，34 modules |
 

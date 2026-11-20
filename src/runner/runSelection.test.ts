@@ -75,17 +75,27 @@ interface Harness {
   toasts: string[];
 }
 
-function install(options: { reply: string; settings?: AnyRecord }): Harness {
+/**
+ * 每次 install 用一个新聊天 id。
+ *
+ * 编排层里有「本会话内这段划线已经写过 tag」的去重表（按 chatId+楼层+划线文本认），
+ * 那是模块级状态，测试之间会互相污染：同一个 id 下同一段划线跑到第二次就会被拦。
+ * 真实世界里每次 install 本来就是另一个聊天，用递增 id 才符合语义。
+ */
+let chatSeq = 0;
+
+function install(options: { reply: string; settings?: AnyRecord; mes?: string; extra?: AnyRecord }): Harness {
   const extensionSettings: AnyRecord = { [SETTINGS_KEY]: options.settings ?? baibaiSettings() };
+  const mes = options.mes ?? MES;
   const message: AnyRecord = {
     name: '小雪',
     is_user: false,
     is_system: false,
-    mes: MES,
-    swipes: [MES],
+    mes,
+    swipes: [mes],
     swipe_id: 0,
     send_date: '2026-11-20T00:00:00Z',
-    extra: {},
+    extra: options.extra ?? {},
   };
   // 固定两层楼：0 号是上文（用来验证「上下文照旧带」），1 号是被划线的那一楼。
   // 楼层号刻意不从 0 开始 —— floor 0 的边界容易掩盖「把目标楼当成上下文」这类错误。
@@ -105,6 +115,7 @@ function install(options: { reply: string; settings?: AnyRecord }): Harness {
 
   const captured: Harness['captured'] = {};
   const toasts: string[] = [];
+  const chatId = `chat-${++chatSeq}`;
   const context: AnyRecord = {
     chat,
     chatMetadata: {},
@@ -113,7 +124,7 @@ function install(options: { reply: string; settings?: AnyRecord }): Harness {
     characterId: 0,
     characters: [{ name: '小雪', avatar: 'a.png' }],
     extensionSettings,
-    getCurrentChatId: () => 'chat-1',
+    getCurrentChatId: () => chatId,
     getRequestHeaders: () => ({}),
     saveMetadataDebounced: () => {},
     saveChat: async () => {},
@@ -152,14 +163,15 @@ function install(options: { reply: string; settings?: AnyRecord }): Harness {
   return { context, message, captured, toasts };
 }
 
-function captureOf(raw: string, floor: number): SelectionCapture {
-  const start = raw.indexOf(SELECTED);
+function captureOf(raw: string, floor: number, needle: string = SELECTED): SelectionCapture {
+  const start = raw.indexOf(needle);
+  if (start < 0) throw new Error(`needle not found: ${needle}`);
   const outcome = buildCapture({
     raw,
     messageId: floor,
     swipeId: 0,
-    domText: SELECTED,
-    located: { start, end: start + SELECTED.length, method: 'strict', candidates: 1 },
+    domText: needle,
+    located: { start, end: start + needle.length, method: 'strict', candidates: 1 },
   });
   if (!outcome.ok) throw new Error(`capture failed: ${outcome.reason}`);
   return outcome.capture;
@@ -265,5 +277,92 @@ describe('runSelection 端到端', () => {
     expect(result.reason).toBe('retries-exhausted');
     expect(harness.message.mes).toBe(MES);
     expect(harness.toasts.some(text => text.startsWith('error:'))).toBe(true);
+  });
+});
+
+/**
+ * 2026-11-20 用户实测反馈的回归：
+ * 「在已经有 bbi_image 的楼里划线出图，会识别到之前的 tag，旧的那版变成『旧提示词』，
+ *   图被顶掉」。
+ *
+ * 这里锁两件事：① 旧 tag 绝不进模型；② 旧 tag 的图文一字不改、历史归属不丢。
+ */
+describe('楼里已有生图 tag', () => {
+  const OLD_TAG = '<bbi_image>1girl, doorway, dim light<size>portrait</size></bbi_image>';
+  const FLOOR = ['走廊很安静。', OLD_TAG, '她推开门，灯闪了一下。', '“你回来了。”'].join('\n');
+
+  /** 取旧图那条历史（真实结构：extra.bbiImage[swipe][hash][]）。 */
+  function oldEntriesOf(harness: Harness): AnyRecord[] {
+    const store = (harness.message.extra as AnyRecord).bbiImage as AnyRecord;
+    return (store?.['0'] as AnyRecord)?.H_OLD as AnyRecord[];
+  }
+
+  function storeWithOldImage(): AnyRecord {
+    return {
+      bbiImage: {
+        '0': {
+          H_OLD: [{ generationId: 'g1', path: '/old.png', prompt: OLD_TAG, seed: null, status: 'ready', createdAt: 1, slotSeq: 0 }],
+        },
+      },
+    };
+  }
+
+  it('旧 tag 不进模型：目标正文里看不到 bbi_image 与旧提示词', async () => {
+    const harness = install({ reply: REPLY, mes: FLOOR, extra: storeWithOldImage() });
+    // 划「她推开门」——它紧挨在旧 tag 下面
+    const result = await runSelection(captureOf(FLOOR, 1, '她推开门，灯闪了一下。'));
+    expect(result.status).toBe('saved');
+
+    const userContent = (harness.captured.messages ?? []).at(-1)?.content ?? '';
+    expect(userContent).toContain('她推开门，灯闪了一下。');
+    expect(userContent).not.toContain('bbi_image');
+    expect(userContent).not.toContain('1girl, doorway');
+  });
+
+  it('旧 tag 原文一字不动，两张 tag 都在正文里', async () => {
+    const harness = install({ reply: REPLY, mes: FLOOR, extra: storeWithOldImage() });
+    await runSelection(captureOf(FLOOR, 1, '她推开门，灯闪了一下。'));
+
+    const lines = String(harness.message.mes).split('\n');
+    expect(lines).toEqual([
+      '走廊很安静。',
+      OLD_TAG,
+      '她推开门，灯闪了一下。',
+      '<bbi_image>1girl, doorway, dim light<size>portrait</size></bbi_image>',
+      '“你回来了。”',
+    ]);
+  });
+
+  it('新 tag 插在旧 tag 下方：旧图槽位不动，不需要迁移', async () => {
+    const harness = install({ reply: REPLY, mes: FLOOR, extra: storeWithOldImage() });
+    await runSelection(captureOf(FLOOR, 1, '她推开门，灯闪了一下。'));
+
+    const oldEntries = oldEntriesOf(harness);
+    expect(oldEntries[0].slotSeq).toBe(0);
+  });
+
+  it('新 tag 插在旧 tag 上方：旧图槽位跟着后移，图不会认领到新卡上', async () => {
+    const harness = install({ reply: REPLY, mes: FLOOR, extra: storeWithOldImage() });
+    // 划「走廊很安静。」——它在旧 tag 上面，新 tag 会插到旧 tag 之前
+    const result = await runSelection(captureOf(FLOOR, 1, '走廊很安静。'));
+    expect(result.status).toBe('saved');
+
+    const next = String(harness.message.mes);
+    const lines = next.split('\n');
+    // 新 tag 落在划线之后、旧 tag 之前，旧 tag 原文原样跟在其后
+    expect(lines[1]).toBe('<bbi_image>1girl, doorway, dim light<size>portrait</size></bbi_image>');
+    expect(lines[2]).toBe(OLD_TAG);
+    // ★ 旧图的历史槽位 0 → 1，与它在楼里的新位置一致
+    const oldEntries = oldEntriesOf(harness);
+    expect(oldEntries[0].slotSeq).toBe(1);
+    // 其余字段一个都没被改
+    expect(oldEntries[0]).toMatchObject({ path: '/old.png', prompt: OLD_TAG, generationId: 'g1' });
+    expect(harness.message.extra as AnyRecord).toHaveProperty('bbiCharChanges');
+  });
+
+  it('旧图不存在（还没出过图）时不凭空创建图片历史', async () => {
+    const harness = install({ reply: REPLY, mes: FLOOR, extra: {} });
+    await runSelection(captureOf(FLOOR, 1, '走廊很安静。'));
+    expect(harness.message.extra as AnyRecord).not.toHaveProperty('bbiImage');
   });
 });

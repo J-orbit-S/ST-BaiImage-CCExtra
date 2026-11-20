@@ -29,7 +29,7 @@ import { resolveCharAnchors } from '@/autoTag/charAnchors';
 import { autoTagProfile, buildAutoTagMessages } from '@/autoTag/prompt';
 import { injectImageTags, parseComicPlan, parseImagePlan, type ImagePlan } from '@/autoTag/protocol';
 import { hashText } from '@/selection/hash';
-import { planSelection } from '@/selection/segmentPlan';
+import { computeSlotShifts, planSelection } from '@/selection/segmentPlan';
 import type { CaptureFailure, SelectionCapture } from '@/selection/capture';
 import { formatCaptureFailure } from '@/selection/capture';
 import {
@@ -41,6 +41,7 @@ import {
   recomputeCharTags,
 } from '@/state/charTags';
 import { getTagGenChannel, isCurrentChatExcluded, settings } from '@/state/settings';
+import { migrateImageSlots } from '@/state/imageSlots';
 import { parseImageTags } from '@/st/imageTagRegex';
 import { applyMessageText, type ApplyMessageResult } from '@/st/messageEdit';
 import { getContext, isAiStoryMessage } from '@/st/context';
@@ -320,6 +321,7 @@ export async function runSelection(capture: SelectionCapture, opts: RunOptions =
 
     // —— 写回：CAS（聊天 / 楼层 / swipe 身份一致），正文以「落盘那一刻」为基底现算
     let rebaseNote = '';
+    let slotShifts: number[] = [];
     const applied = await applyMessageText(
       floor,
       currentText => {
@@ -331,12 +333,10 @@ export async function runSelection(capture: SelectionCapture, opts: RunOptions =
           return null;
         }
         rebaseNote = built.mode === 'rebased' && built.report ? describeRebase(built.report) : '';
-        // injectImageTags 与 protocol 同一份序列化口径；此处再兜一次越界
-        try {
-          return built.text;
-        } catch {
-          return null;
-        }
+        // 新 tag 若插在既有 tag 之前，既有 tag 的槽位序号会平移，图片历史就认错人。
+        // 这里只算位移，真正迁移在正文写成功之后（写失败就不该动历史）。
+        slotShifts = computeSlotShifts(base, built.images.map(image => image.sourceLine));
+        return built.text;
       },
       chatId,
       swipeId,
@@ -347,6 +347,16 @@ export async function runSelection(capture: SelectionCapture, opts: RunOptions =
     if (applied === 'saved') {
       recomputeCharTags();
       if (imagePlan.images.length) written.set(identity, tagCountNow + imagePlan.images.length);
+
+      // 旧 tag 的图必须留在自己身上：把被挤动的历史槽位一起后移（见 state/imageSlots.ts）
+      const moved = await migrateImageSlots(context, context.chat?.[floor], swipeId, slotShifts);
+      if (moved.changed) {
+        console.info(`[CCX] 第 ${floor} 楼已有图的槽位序号后移：${moved.changed} 条记录`);
+        diagnostic('runSelection:slotShift', { floor, swipeId, entries: moved.changed, shifts: slotShifts });
+      } else if (moved.skipped) {
+        diagnostic('runSelection:slotShift', { floor, swipeId, skipped: moved.skipped, shifts: slotShifts });
+      }
+
       if (rebaseNote) console.info(`[CCX] 第 ${floor} 楼 tag 位置重定位:${rebaseNote}`);
       if (imagePlan.images.length) {
         notify(

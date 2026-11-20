@@ -205,7 +205,14 @@ export function describeRebase(report: RebaseReport): string {
 }
 
 export type WritebackBuild =
-  | { ok: true; text: string; mode: 'direct' | 'rebased'; report?: RebaseReport }
+  | {
+      ok: true;
+      text: string;
+      /** 换算到 currentText 行号后的插入点（迁移既有 tag 的槽位序号时要用）。 */
+      images: ImageInsertion[];
+      mode: 'direct' | 'rebased';
+      report?: RebaseReport;
+    }
   | { ok: false; reason: 'position-lost' | 'rebase-failed' | 'inject-failed' };
 
 /**
@@ -227,6 +234,7 @@ export function buildWritebackText(
     return {
       ok: true,
       text: injectImageTags(currentText, resolved.images),
+      images: resolved.images,
       mode: resolved.mode,
       report: resolved.report,
     };

@@ -525,7 +525,7 @@ troubleshooting_prefix: "[CCX][AutoTagDebug]"
 
 ```
 npm run typecheck                 0 error
-npm test                         26 文件 / 425 tests 全过
+npm test                         27 文件 / 451 tests 全过
 verify:upstream                  40 文件 SHA256 + 3 片段 + 10 常量全 MATCH
 npm run build                    dist/index.js 单文件（175 KB / gzip 69 KB）
 ```
@@ -550,3 +550,42 @@ npm run build                    dist/index.js 单文件（175 KB / gzip 69 KB�
 | `README.md` | 安装与使用 |
 
 本文是「协议契约」，`RETROSPECTIVE.md` 是「决策档案」。**改动流程与版本日志只维护在后者**，避免两处不同步。
+
+### 13.7 v0.1.1：既有 tag 的保护（2026-11-20 实测反馈）
+
+用户在第一版真实使用中报：**在已有 `bbi_image` 的楼里划线出图，旧的那版变成「旧提示词」、图被顶掉。**
+拆开是两个独立问题，都已修，且各有一条回归测试钉住。
+
+**问题 1：旧 tag 被当成正文送进模型。**
+
+`prepareTargetText` 只按「剔除标签」名单删噪声，`bbi_image` 不在其中（历史楼层还要靠它续接外貌），
+所以切片一旦覆盖到旧 tag 行，目标文本里就出现 `<bbi_image>1girl…</bbi_image> ⟦P2⟧`。
+后果：模型把它读成可插图的正文，并为它再出一张图；还可能顺着它把旧提示词抄进新 tag（等于替旧图重 roll）。
+
+修法：`selection/segmentPlan.ts` 的 `maskImageTags` 在**切片与整楼两侧都涂白**（等长、保留换行）。
+必须先涂白而不能删：`stripImageTags` 会连带吃掉前面的换行，之后每行行号前移一格，
+`absoluteSegments` 整体错位——tag 插到上一段去，而且流程显示「成功」。
+涂白后纯 tag 行变成空白行，被 `prepareTargetText` 过滤，模型既看不到也不会拿到指向它的位置 ID。
+`divergent` 的判定同步改成「都涂白之后再比」，否则任何含 tag 的切片都会被误判成口径分歧。
+
+**问题 2：插入点在既有 tag 之前 → 旧图的历史归属错位。**
+
+柏宝绘按 `(promptHash, slotSeq)` 匹配历史（§见 `floor/storage.ts`）。新 tag 插在旧 tag 前面时，
+旧 tag 序号 N→N+1，历史仍在 N 上：
+
+| 卡片 | 不迁移 | 迁移后 |
+|---|---|---|
+| 旧卡 | pending（图被顶掉） | ready（图还在，可翻页） |
+| 新卡 | stale（顶着旧图 +「旧提示词」） | pending（干净的待生成） |
+
+修法：`selection/segmentPlan.ts` 的 `computeSlotShifts` 算出每条既有 tag 的后移位数
+（插入行 < tag 行才算；同一行的插入由 `injectImageTags` 追加在其后，不位移），
+正文写**成功之后**由 `state/imageSlots.ts` 的 `migrateImageSlots` 按 `slotSeq` 平移 extra 里的记录。
+写失败不迁移；结构不认识就跳过并记日志，绝不重建（宁可旧卡待生成，也不写坏别人的数据）。
+
+**边界声明**：这仍不是「第三处分析链路差异」。分析用的 source、rebase 基底照旧；这里动的是楼层数据，
+柏宝绘自己每次出图也在写同一份数据，它的代码一行未改（`verify:upstream` 仍是全 MATCH）。
+
+**回归测试**：`selection/segmentPlan.test.ts`（涂白保行号、位置 ID 不指向 tag 行、位移计算）、
+`state/imageSlots.test.ts`（ready/stale/pending 机制对照 + 结构不认识不碰）、
+`runner/runSelection.test.ts`（旧 tag 不进模型、原文一字不动、槽位 0→1、没图时不凭空建 `bbiImage`）。

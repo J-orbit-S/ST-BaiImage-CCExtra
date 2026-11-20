@@ -41,6 +41,78 @@ export type PlanOutcome =
   | { ok: true; plan: SelectionPlan }
   | { ok: false; reason: 'stale' | 'empty-target' | 'line-mismatch'; detail?: string };
 
+/**
+ * 把正文里已有的生图 tag 原地涂成空白，**字符数与换行一个都不变**。
+ *
+ * 为什么必须涂白而不是像 `stripImageTags` 那样删掉：本层的所有行号都是「物理行下标」，
+ * 删掉一个 tag 会连同它前面的换行一起吃掉，后面每一行的行号都往前挪一格，
+ * `absoluteSegments` 就会整体错位——tag 插到上一段去，而且看起来「成功了」。
+ * 涂白后：纯 tag 行变成空白行（下游 `prepareTargetText` 会把它过滤掉，模型看不见），
+ * 正文 + 内联 tag 的行只剩正文，行号与偏移全部保持原值。
+ *
+ * 为什么必须做这件事（2026-11-20 用户实测反馈）：
+ * 楼里已有 `<bbi_image>` 时，切片会把它当成正文送进目标文本，模型会
+ *   ① 把它读成「可插图的正文」，为一个 tag 再生成一张图；
+ *   ② 顺着它把旧提示词抄进新 tag（等于替旧图重 roll）。
+ * 旧 tag 属于「已经出过图的产物」，不是叙事内容，分析阶段必须当它不存在。
+ */
+export function maskImageTags(text: string): string {
+  const source = String(text ?? '');
+  const tokens = /<\/?bbi_image\b[^>]*>/gi;
+  const ranges: Array<{ start: number; end: number }> = [];
+  const openStack: Array<{ start: number; end: number }> = [];
+  for (let match = tokens.exec(source); match; match = tokens.exec(source)) {
+    const start = match.index;
+    const end = start + match[0].length;
+    if (match[0][1] === '/') {
+      const open = openStack.pop();
+      ranges.push({ start: open ? open.start : start, end });
+    } else {
+      openStack.push({ start, end });
+    }
+  }
+  // 落单的开/闭标签（AI 只写了一半、或别的插件截断）同样涂掉：留着它照样会误导模型
+  for (const open of openStack) ranges.push(open);
+
+  ranges.sort((left, right) => left.start - right.start);
+  const chars = source.split('');
+  let cursor = 0;
+  for (const range of ranges) {
+    // 嵌套时外层区间已经吃掉内层，跳过
+    if (range.start < cursor) continue;
+    for (let index = range.start; index < range.end; index += 1) {
+      if (chars[index] !== '\r' && chars[index] !== '\n') chars[index] = ' ';
+    }
+    cursor = range.end;
+  }
+  return chars.join('');
+}
+
+/**
+ * 新 tag 插进来之后，**已有 tag 的槽位序号会平移多少**。
+ *
+ * 柏宝绘的图片历史按 `(promptHash, slotSeq)` 归属（floor/storage.ts 的 entrySeq），
+ * `slotSeq` 就是 tag 在楼里的序号。若新 tag 插在某条既有 tag **之前**，那条 tag
+ * 从 N 变成 N+1，它的图就找不到自己——旧卡退回「待生成」，而新卡因为同序号下
+ * 有别的 hash 而显示成「旧提示词」，还顶着旧图。用户看到的就是「旧图被新卡顶掉」。
+ *
+ * 所以写回后要按这份位移把 extra 里的 slotSeq 一起挪（见 state/imageSlots.ts）。
+ *
+ * `insertLines` 必须是**已换算到 currentText 行号**的插入行；`injectImageTags` 把
+ * 新 tag 落在该行文本之后，因此落在同一行的插入不计入位移（它排在既有 tag 之后）。
+ *
+ * 返回数组下标 = 既有 tag 的序号，值 = 该 tag 需要后移的位数。全 0 表示无需迁移。
+ */
+export function computeSlotShifts(baseText: string, insertLines: number[]): number[] {
+  const pattern = /<bbi_image\b[^>]*>[\s\S]*?<\/bbi_image>|<bbi_image\b[^>]*>/gi;
+  const shifts: number[] = [];
+  for (const match of baseText.matchAll(pattern)) {
+    const tagLine = lineIndexAt(baseText, match.index ?? 0);
+    shifts.push(insertLines.filter(line => Number.isInteger(line) && line < tagLine).length);
+  }
+  return shifts;
+}
+
 /** 某字符偏移位于第几个物理行（0-based）。 */
 export function lineIndexAt(text: string, offset: number): number {
   const limit = Math.max(0, Math.min(offset, text.length));
@@ -68,11 +140,16 @@ export function planSelection(
 ): PlanOutcome {
   if (hashText(mes) !== capture.sourceHash) return { ok: false, reason: 'stale' };
 
-  const slicePrepared = prepareTargetText(capture.text, stripTags);
+  // 旧 tag 不是叙事内容：涂白后送模型，行号原样保留（见 maskImageTags 的注释）
+  const slicePrepared = prepareTargetText(maskImageTags(capture.text), stripTags);
   if (!slicePrepared.segments.length) return { ok: false, reason: 'empty-target' };
 
+  // 整楼侧两套：real 给写回对齐（rebase 靠原文行文本），masked 只用于口径对照
   const wholeByLine = new Map(
     prepareTargetText(mes, stripTags).segments.map(segment => [segment.sourceLine, segment]),
+  );
+  const wholeMaskedByLine = new Map(
+    prepareTargetText(maskImageTags(mes), stripTags).segments.map(segment => [segment.sourceLine, segment]),
   );
   const startLine = lineIndexAt(mes, capture.range.start);
 
@@ -85,7 +162,8 @@ export function planSelection(
       // 切片清洗保留了这一行，整楼清洗却没有：说明切片边界切进了某个跨行噪声块内部。
       return { ok: false, reason: 'line-mismatch', detail: `绝对行 ${line} 在整楼清洗中不存在` };
     }
-    if (whole.text !== segment.text) divergent = true;
+    // 只比「都涂掉 tag 之后」的文本：否则任何含 tag 的切片都会被误判成 divergent
+    if (wholeMaskedByLine.get(line)?.text !== segment.text) divergent = true;
     absoluteSegments.push({ id: segment.id, sourceLine: line, text: whole.text });
   }
 

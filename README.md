@@ -61,12 +61,23 @@
 4. **漫画方案**下划线出的是「这一段的漫画页」，页数仍由模型按内容决定。
 5. 出图仍要点卡片——柏宝绘的自动出图标记是它进程内的内存 Map，第三方无法置位（不碰它是刻意的）。
 
+## 同一楼出多张图会怎样（v0.1.1 起）
+
+楼里**已经有 tag 和图片**时再划线，行为是「加一张」，不是「重做一遍」：
+
+- 旧 tag 不进分析：模型看不到它的提示词，**不会替你重 roll 那张图**；
+- 旧 tag 的原文一个字不改，旧图仍在原卡片上；
+- 新 tag 落在你划线那段之后；如果它插在旧 tag **上面**，插件会把旧图的历史槽位序号一起后移，
+  让旧卡继续认领自己的图（否则柏宝绘会按「同序号不同提示词」把它显示成「旧提示词」并让新卡顶走旧图）。
+
+想重出旧图，仍然用柏宝绘卡片自己的「重新生成」。
+
 ## 开发
 
 ```bash
 npm run setup            # 本机 npm 解析 vitest peer 有 bug，必须带 --legacy-peer-deps
 npm run typecheck
-npm test                 # 26 文件 / 425 tests
+npm test                 # 27 文件 / 451 tests
 npm run build            # → dist/index.js（单文件）
 npm run sync:st          # 构建产物同步到 SillyTavern 扩展目录
 ```
@@ -113,6 +124,7 @@ src/
 | `runSelection:start` | 取词成功，`segmentCount` = 送给模型的行数，应为划线行数 |
 | `runSelection:skip reason=…` | 被闸门拦下（`stale` / `swipe-changed` / `already-processed` / …） |
 | `runSelection:saved` | 写入成功，带 images / changes / rebase 摘要 |
+| `runSelection:slotShift` | 新 tag 插在旧 tag 上面，旧图历史槽位后移了几条（`skipped=no-store` 表示这楼还没有图，无需迁移） |
 | `writeback:abort reason=…` | 落点失效（`position-lost` / `rebase-failed`），正文未改 |
 
 ## 许可与致谢
