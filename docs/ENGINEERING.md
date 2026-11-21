@@ -974,3 +974,42 @@ v0.2.4 的 `removeAllRanges()` 是**用别人的功能换自己的可见性**：
 - **弃用**：Custom Highlight API 假高亮、`::highlight` 样式注入、`removeAllRanges` 全部删除。
 
 
+
+### 13.15 v0.2.6-local.1：划线气泡可见性模型重写（2026-11-21）
+
+用户真机录屏：**选区第 4 秒就出现，气泡第 36 秒才第一次浮出**——中间反复调整手柄、
+换选段，气泡一次都没出来。这不是玄学，是 v0.2.3 引入的 `suppressed` 抑制位的**死锁**：
+
+```
+settle() 捕获失败（任何一个理由）
+  → hide() → hide 发现选区还在 → suppressed = true
+  → 之后所有 selectionchange 被 if (suppressed) return 拦死
+  → 手机上长按选区后选区长期不塌陷 → 气泡永久哑火，直到选区塌陷才解锁
+```
+
+照 [book-excerpt](https://github.com/Mshiyuan/book-excerpt) 的成熟做法重写为
+**可见性是当前选区的纯函数**：
+
+```
+选区非空且能捕获 → 显示；塌陷 → 收起；滚动 → 按当前选区重新锚定（跟随）。
+```
+
+| 改动 | 旧 | 新 |
+| --- | --- | --- |
+| 去抖 | 350ms，无 touchend | **120ms** + 补 `touchend` 监听（手指抬起的确定性信号） |
+| 失败处理 | hide → 抑制位 → 死锁 | **无抑制位**。失败只收起这一次，下次事件照常重查 |
+| 显式忽略 | 无（抑制位兼职） | `dismissed`：仅 ✕ / Esc / 动作完成时置位；塌陷或新手势（mouseup/touchend）解除 |
+| 滚动 | 一律 hide | 选区活着 → **跟随重新锚定**（气泡是 fixed 定位，不跟就飘在原地） |
+| 点按钮 | 只绑 click | 容器 pointerdown preventDefault + 按钮 click/**touchend 双绑** + 300ms 忙锁 |
+
+关键语义：`hide(dismiss)` 的 dismiss **只在用户明确说「这次选区不要了」**时为 true；
+捕获失败、塌陷这类非用户意图的收起传 `false`。回归钉：`trigger.test.ts` 的
+「捕获失败只收起这一次，不产生死锁」——初版实现里 hide 无条件 dismiss，
+恰好被这个用例抓出来（失败后重试被堵死），这正是死锁的变体。
+
+#### 验收
+
+```
+npm run typecheck   0 error
+npm test            38 文件 / 602 tests（新增 8：可见性模型全套，含死锁回归钉）
+```

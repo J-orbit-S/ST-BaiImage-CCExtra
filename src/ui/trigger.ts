@@ -12,8 +12,8 @@
  *    等按钮的 click 回来再 `captureSelection()` 就已经没有选区了 —— 用户会看到
  *    「点了没反应」。所以 mouseup 时就地算好快照，click 只负责把快照交给执行层。
  *    三个按钮**共用同一份快照**。
- * 2. **每个按钮的 mousedown 都必须 preventDefault**。否则按下按钮的瞬间选区被清，
- *    页面还会滚一下（focus 行为）。漏一个，那个按钮按下去就等于什么都没选。
+ * 2. **按下按钮不许清选区**。容器级 pointerdown preventDefault（触屏）+ 每个按钮
+ *    mousedown preventDefault（桌面）。漏一个，按下去的瞬间选区被清，页面还会滚一下。
  * 3. **只在 AI 剧情楼浮出**。柏宝绘的楼层按钮也不给用户楼 —— 本插件出的是 tag，
  *    用户楼没有卡片可渲染，浮出来只会点到一句「这一楼不是剧情楼层」。
  * 4. **忙态只留一个按钮**：`✕ 取消分析`。此时若还摆着「生成 / 待生成」，
@@ -22,14 +22,24 @@
  * 定位（v0.2.5）：气泡压在**选区内部、纵向偏下**（62% 处）的位置，横向居中。
  * 为什么不再挂在选区下方：那一条是所有划线工具的**公共地盘**——系统选择菜单
  * （拷贝/翻译）、其他插件的气泡都在那儿，谁挂上去都会互相盖。
- * v0.2.4 试过「清掉真实选区让系统菜单消失」，结果把其他插件的气泡一起顶掉了
- * （它们同样依赖真实选区），已回退。选区内偏下是唯一没人占的位置。
  * 仍然用 fixed 定位 + 视口钳位，不依赖任何 ST 布局容器（ST 改版不会把我们挤到页面外）。
  *
- * 触屏（v0.2.3）：手机上划线靠长按 + 手柄拖动，**从头到尾没有 mouseup**——
- * 只听 mouseup 的版本在手机上永远不出气泡。所以补一条 `selectionchange` 监听：
- * 选区稳定（去抖 350ms 没再变）且非空才落定。抑制位（`suppressed`）保证
- * 「点过按钮 / 手动收起后」残留的选区不会把气泡又顶回来。
+ * 可见性模型（v0.2.6，照 book-excerpt 的成熟做法重写）：
+ *
+ *   **工具条的可见性是「当前选区」的纯函数**：选区非空且能捕获 → 显示；
+ *   选区塌陷 → 收起；滚动 → 跟着选区重新锚定。没有任何「一次失败就永久哑火」的
+ *   抑制位——v0.2.3~v0.2.5 的 `suppressed` 有一个死锁：settle 一失败就 hide，
+ *   hide 发现选区还在就置抑制位，而手机上长按选区后选区长期不塌陷，
+ *   于是 selectionchange 全部被拦，气泡再也不出来（真机录屏实测 32 秒不出）。
+ *
+ *   唯一的例外是**显式忽略**（`dismissed`）：用户点了 ✕ / Esc / 完成了一次动作，
+ *   表示「这次选区我不要了」，此后滚动和 selectionchange 不再复显——
+ *   直到选区塌陷，或用户做出新的手势（mouseup / touchend）。
+ *
+ * 触屏（v0.2.3 起，v0.2.6 重做）：手机划线靠长按 + 手柄拖动，**从头到尾没有 mouseup**。
+ * 监听三路：`selectionchange`（去抖 120ms）、`touchend`（去抖 120ms，手指抬起的确定性信号）、
+ * `mouseup`（桌面立即落定）。系统菜单（拷贝/翻译）依附真实选区，我们不清选区（v0.2.5 教训），
+ * 气泡压在选区内部偏下避开它。
  */
 
 import { captureSelection, describeCapture, type SelectionCapture } from '@/selection/capture';
@@ -59,15 +69,19 @@ let cancelling = false;
 let runningFloor: number | null = null;
 let bound = false;
 
-/** 选区稳定判定：手机拖动选区手柄时 selectionchange 会连发，停 350ms 才算划完。 */
-const SETTLE_DELAY = 350;
+/**
+ * 选区稳定判定：手机拖动选区手柄时 selectionchange 会连发，停 120ms 才算划完。
+ * v0.2.3 用 350ms 是为了「拖完再出」，实测太钝（真机上像失灵）；120ms 与
+ * book-excerpt 同款，拖动中每次变化都重置计时，停手即出。
+ */
+const SETTLE_DELAY = 120;
 let settleTimer: number | null = null;
 /**
- * 抑制位：hide() 时选区往往还在（手机上点按钮不清选区）。
- * 不压住的话，下一次 selectionchange（比如其他插件动了 DOM）会把气泡又顶回来。
- * 选区一塌陷（用户重新划线）就解除。
+ * 显式忽略：用户点了 ✕ / Esc / 完成一次动作后置位——这次选区不要了，
+ * 滚动与 selectionchange 不再复显。选区塌陷或新的手势（mouseup/touchend）解除。
+ * 它不是 v0.2.3 那个会死锁的抑制位：那只拦「自动复显」，绝不拦新手势。
  */
-let suppressed = false;
+let dismissed = false;
 
 /** 三套颜色：正常 / 待生成（轻一点，不抢主按钮）/ 取消（红，明确会中止任务）。 */
 const BASE_BG = 'rgba(28,36,44,.94)';
@@ -96,9 +110,32 @@ function stylePill(button: HTMLButtonElement, background: string): void {
       : '500 12px/1.6 system-ui,"PingFang SC","Microsoft YaHei",sans-serif',
     cursor: 'pointer',
     whiteSpace: 'nowrap',
+    userSelect: 'none',
+    WebkitUserSelect: 'none',
+    WebkitTouchCallout: 'none',
+    touchAction: 'manipulation',
   } as Partial<CSSStyleDeclaration>);
   // 按下不许清选区（见文件头第 2 条）。三个按钮都要绑，漏一个就点不动。
   button.addEventListener('mousedown', event => event.preventDefault());
+}
+
+/**
+ * click 与 touchend 双绑（book-excerpt 同款）：触屏直接在 touchend 响应，
+ * 不等浏览器合成 click（iOS 上慢且可能被系统菜单截走）；300ms 忙锁防止
+ * touchend + 合成 click 双触发跑两遍。
+ */
+function bindButtonActivation(button: HTMLButtonElement, onClick: () => void): void {
+  let lockUntil = 0;
+  const fire = (event: Event): void => {
+    event.preventDefault();
+    event.stopPropagation();
+    const now = Date.now();
+    if (now < lockUntil) return;
+    lockUntil = now + 300;
+    onClick();
+  };
+  button.addEventListener('click', fire);
+  button.addEventListener('touchend', fire, { passive: false });
 }
 
 function makeButton(text: string, background: string, onClick: () => void): HTMLButtonElement {
@@ -106,11 +143,7 @@ function makeButton(text: string, background: string, onClick: () => void): HTML
   button.type = 'button';
   button.textContent = text;
   stylePill(button, background);
-  button.addEventListener('click', event => {
-    event.preventDefault();
-    event.stopPropagation();
-    onClick();
-  });
+  bindButtonActivation(button, onClick);
   return button;
 }
 
@@ -127,7 +160,15 @@ function ensureToolbar(): HTMLDivElement {
     gap: COARSE_POINTER ? '8px' : '4px',
     // 容器本身不可见也不吃事件：否则它会在选区旁边留一块"透明墙"
     background: 'transparent',
+    // 触屏按按钮时不许触发文字选择 / iOS 长按呼出
+    userSelect: 'none',
+    WebkitUserSelect: 'none',
+    WebkitTouchCallout: 'none',
+    touchAction: 'manipulation',
   } as Partial<CSSStyleDeclaration>);
+  // 容器级 pointerdown preventDefault：iOS 上点按钮的瞬间会清掉选区（点在选区外），
+  // 按钮用的是快照不依赖选区，但清选区会连带触发 selectionchange → 收起竞态。
+  el.addEventListener('pointerdown', event => event.preventDefault());
 
   generateButton = makeButton(GENERATE_TEXT, BASE_BG, () => void trigger());
   draftButton = makeButton(DRAFT_TEXT, DRAFT_BG, () => parkSelection());
@@ -140,6 +181,10 @@ function ensureToolbar(): HTMLDivElement {
   document.body.appendChild(el);
   toolbar = el;
   return el;
+}
+
+function isToolbarVisible(): boolean {
+  return Boolean(toolbar && toolbar.style.display === 'flex');
 }
 
 /**
@@ -162,12 +207,16 @@ function showAt(rect: DOMRect): void {
   el.style.display = 'flex';
 }
 
-function hide(): void {
+/**
+ * 收起工具条。`dismiss` 只在**用户明确说「这次选区不要了」**时为 true
+ * （✕ / Esc / 一次动作完成）：此后滚动与 selectionchange 不再自动复显。
+ * 捕获失败、选区塌陷这类「非用户意图」的收起必须传 false——否则一次失败
+ * 就把复显路堵死，这就是 v0.2.5 抑制位死锁的变体（真机录屏 32 秒不出气泡）。
+ */
+function hide(dismiss = true): void {
   pending = null;
   if (toolbar) toolbar.style.display = 'none';
-  // 选区还在的话压住 selectionchange 的自动复显；塌陷后自动解除（见 suppressed 注释）
-  const selection = typeof document !== 'undefined' ? document.getSelection?.() ?? window.getSelection() : null;
-  suppressed = Boolean(selection && !selection.isCollapsed);
+  dismissed = dismiss;
 }
 
 /**
@@ -251,7 +300,7 @@ function parkSelection(): void {
   hide();
 }
 
-/** 选区落定后：能出图就浮按钮，不能就安静地什么都不做。 */
+/** 选区落定后：能出图就浮按钮，不能就安静地什么都不做。失败不留任何死锁状态——下次事件照常重查。 */
 function settle(): void {
   if (busy) return;
   const outcome = captureSelection();
@@ -261,23 +310,24 @@ function settle(): void {
     if (outcome.reason !== 'no-selection' && outcome.reason !== 'empty-selection') {
       diagnostic('trigger:no-capture', { reason: outcome.reason, detail: outcome.detail ?? null });
     }
-    hide();
+    hide(false);
     return;
   }
   const context = getContext();
   const message = context?.chat?.[outcome.capture.messageId];
   if (!isAiStoryMessage(message)) {
     diagnostic('trigger:skip', { reason: 'not-ai-story-message', floor: outcome.capture.messageId });
-    hide();
+    hide(false);
     return;
   }
   const selection = window.getSelection();
   if (!selection || selection.rangeCount === 0) {
-    hide();
+    hide(false);
     return;
   }
   const rect = selection.getRangeAt(0).getBoundingClientRect();
   pending = outcome.capture;
+  dismissed = false;
   console.debug(describeCapture(outcome.capture));
   showAt(rect);
 }
@@ -294,23 +344,34 @@ function scheduleSettle(): void {
 function onSelectionChange(): void {
   const selection = typeof document !== 'undefined' ? document.getSelection?.() ?? window.getSelection() : null;
   if (!selection || selection.isCollapsed) {
-    // 划到一半塌陷（误触 / 重新开始）：停掉在途判定，并解除抑制
+    // 划到一半塌陷（误触 / 重新开始）：停掉在途判定，收起气泡，解除显式忽略
     if (settleTimer !== null) {
       window.clearTimeout(settleTimer);
       settleTimer = null;
     }
-    suppressed = false;
+    if (isToolbarVisible()) hide(false);
+    dismissed = false;
     return;
   }
-  if (suppressed) return;
+  // 非空选区：只要不是用户显式忽略的，就照常去查。v0.2.3 的抑制位死锁已删——
+  // 一次捕获失败不该让气泡永久哑火（真机录屏 32 秒不出气泡的根因）。
+  if (dismissed) return;
   scheduleSettle();
 }
 
-/** 选区之外的地方按下/滚动，就该收起来 —— 否则按钮会飘在屏幕上跟着用户走。 */
-function onDocumentMouseDown(event: MouseEvent): void {
-  if (toolbar && event.target instanceof Node && toolbar.contains(event.target)) return;
-  if (busy) return;
-  hide();
+/**
+ * 滚动跟随：气泡是 fixed 定位，文字滚走了它不会自己动。
+ * 只要气泡正显示且选区还活着，就按当前选区重新锚定；选区塌陷才收起。
+ * 显式忽略（✕ / Esc / 动作完成）后不复显、也不跟随。
+ */
+function onScroll(): void {
+  if (!isToolbarVisible() || dismissed) return;
+  const selection = typeof document !== 'undefined' ? document.getSelection?.() ?? window.getSelection() : null;
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+    hide(false);
+    return;
+  }
+  showAt(selection.getRangeAt(0).getBoundingClientRect());
 }
 
 export interface TriggerOptions {
@@ -329,10 +390,15 @@ export function bindSelectionTrigger(options: TriggerOptions = {}): () => void {
   if (bound) return () => {};
   bound = true;
 
-  // mouseup / keyup 是桌面路径；路径上先解除抑制——用户主动划了新选区，必须照常浮出
+  // mouseup / touchend 是「用户主动手势」：一律解除显式忽略——用户在划新选区，必须照常浮出。
+  // 桌面 mouseup 立即落定；触屏 touchend 走 120ms 去抖（等选区最终定型）。
   const onSettle = () => {
-    suppressed = false;
+    dismissed = false;
     settle();
+  };
+  const onTouchEnd = () => {
+    dismissed = false;
+    scheduleSettle();
   };
   const onKeyDown = (event: KeyboardEvent) => {
     if (event.key !== 'Escape') return;
@@ -344,31 +410,28 @@ export function bindSelectionTrigger(options: TriggerOptions = {}): () => void {
     }
     hide();
   };
-  const onScroll = () => {
-    if (!busy) hide();
-  };
 
   doc.addEventListener('mouseup', onSettle, true);
+  doc.addEventListener('touchend', onTouchEnd, true);
   doc.addEventListener('keyup', onSettle, true);
   doc.addEventListener('selectionchange', onSelectionChange, true);
-  doc.addEventListener('mousedown', onDocumentMouseDown, true);
   doc.addEventListener('keydown', onKeyDown, true);
   win.addEventListener('scroll', onScroll, true);
 
-  diagnostic('trigger:bound', { toolbarId: TOOLBAR_ID, coarsePointer: COARSE_POINTER });
+  diagnostic('trigger:bound', { toolbarId: TOOLBAR_ID, coarsePointer: COARSE_POINTER, settleDelay: SETTLE_DELAY });
 
   return () => {
     doc.removeEventListener('mouseup', onSettle, true);
+    doc.removeEventListener('touchend', onTouchEnd, true);
     doc.removeEventListener('keyup', onSettle, true);
     doc.removeEventListener('selectionchange', onSelectionChange, true);
-    doc.removeEventListener('mousedown', onDocumentMouseDown, true);
     doc.removeEventListener('keydown', onKeyDown, true);
     win.removeEventListener('scroll', onScroll, true);
     if (settleTimer !== null) {
       window.clearTimeout(settleTimer);
       settleTimer = null;
     }
-    suppressed = false;
+    dismissed = false;
     toolbar?.remove();
     toolbar = null;
     generateButton = null;
