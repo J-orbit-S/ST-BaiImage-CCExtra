@@ -53,6 +53,12 @@ export interface CandidateVersion {
   changes: CharChange[];
   /** Base tag 的中文对照。缺失 = 模型没给 / 关了这个开关 / 手改过英文后失效。 */
   tagZh?: string;
+  /**
+   * 角色分项 tag 的中文对照，与 `image.characters[]` 同下标。
+   * v0.2.3 起角色分项也翻（用户反馈：角色库是判断「画的是谁」的关键，不翻等于白看一半）。
+   * 同样只给人看，绝不写回。
+   */
+  charactersZh?: string[];
   createdAt: number;
 }
 
@@ -124,10 +130,14 @@ function normalizeVersion(raw: unknown): CandidateVersion | null {
     ? raw.changes.filter((item): item is CharChange => isPlainObject(item) && nonEmptyString(item.name))
     : [];
   const tagZh = typeof raw.tagZh === 'string' && raw.tagZh.trim() ? raw.tagZh.trim() : undefined;
+  const charactersZh = Array.isArray(raw.charactersZh)
+    ? raw.charactersZh.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    : undefined;
   return {
     image: raw.image,
     changes,
     ...(tagZh ? { tagZh } : {}),
+    ...(charactersZh?.length ? { charactersZh } : {}),
     createdAt: Number.isFinite(raw.createdAt) ? (raw.createdAt as number) : Date.now(),
   };
 }
@@ -334,6 +344,8 @@ export interface NewCandidateInput {
   changes: CharChange[];
   /** 与 `images` 同下标的中文对照（缺省 = 全部没有）。只给人看，绝不写回。 */
   tagZh?: string[];
+  /** 与 `images` 同下标的角色分项中文对照（每项再与该图 characters[] 同下标）。 */
+  charactersZh?: string[][];
 }
 
 /** 一次分析里「同一批」的标识：同一楼、同一 swipe、同一组段 = 同一批。 */
@@ -373,7 +385,14 @@ export function addAnalysis(input: NewCandidateInput): number {
     // 整个 plan 只有第一张带 changes：确认两张时不会把建档做两遍
     const changes = index === 0 ? input.changes : [];
     const zh = input.tagZh?.[index]?.trim();
-    const version: CandidateVersion = { image, changes, ...(zh ? { tagZh: zh } : {}), createdAt: now };
+    const charZh = input.charactersZh?.[index]?.filter(item => item.trim());
+    const version: CandidateVersion = {
+      image,
+      changes,
+      ...(zh ? { tagZh: zh } : {}),
+      ...(charZh?.length ? { charactersZh: charZh } : {}),
+      createdAt: now,
+    };
 
     if (existing === undefined) {
       store.items.push({
@@ -478,13 +497,20 @@ export function fillDraft(imageId: string, versions: CandidateVersion[]): boolea
 }
 
 /** 重 Roll：给同一张图追加一版并切到最新。返回条目数（找不到 = 0）。 */
-export function addCandidateVersion(imageId: string, image: ImageInsertion, tagZh?: string): number {
+export function addCandidateVersion(imageId: string, image: ImageInsertion, tagZh?: string, charactersZh?: string[]): number {
   const store = readStore();
   const chatId = currentChatId();
   const item = store.items.find(entry => entry.imageId === imageId && entry.chatId === chatId);
   if (!item || item.status !== 'pending') return 0;
   const zh = tagZh?.trim();
-  item.versions.push({ image, changes: [], ...(zh ? { tagZh: zh } : {}), createdAt: Date.now() });
+  const charZh = charactersZh?.filter(item => item.trim());
+  item.versions.push({
+    image,
+    changes: [],
+    ...(zh ? { tagZh: zh } : {}),
+    ...(charZh?.length ? { charactersZh: charZh } : {}),
+    createdAt: Date.now(),
+  });
   item.activeVersion = item.versions.length - 1;
   item.updatedAt = Date.now();
   writeStore(store);

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { extractTagZh, TAG_ZH_TASK_NOTE } from '@/autoTag/tagZh';
+import { extractCharactersZh, extractTagZh, TAG_ZH_TASK_NOTE } from '@/autoTag/tagZh';
 
 /**
  * 中文对照是「锦上添花」字段：任何解析失败都必须静默降级成空串，
@@ -44,9 +44,42 @@ describe('extractTagZh', () => {
     expect(extractTagZh(raw)).toEqual(['', '']);
   });
 
-  it('协议要求里写明：只翻 Base、项数一一对应、tag 本身不改', () => {
+  it('协议要求里写明：Base 与角色分项都翻、项数一一对应、tag 本身不改', () => {
     expect(TAG_ZH_TASK_NOTE).toContain('tagZh');
-    expect(TAG_ZH_TASK_NOTE).toContain('characters');
+    expect(TAG_ZH_TASK_NOTE).toContain('charactersZh');
+    expect(TAG_ZH_TASK_NOTE).toContain('等长');
     expect(TAG_ZH_TASK_NOTE).toContain('一个字都不要改');
+  });
+});
+
+describe('extractCharactersZh', () => {
+  it('按 images 下标取出每张图的分项对照，缺失的给空数组', () => {
+    const raw = JSON.stringify({
+      images: [
+        { position: 'P1', tag: 'a', charactersZh: ['男孩，银发', '女孩，棕发'] },
+        { position: 'P2', tag: 'b' },
+        { position: 'P3', tag: 'c', charactersZh: [] },
+      ],
+    });
+    expect(extractCharactersZh(raw)).toEqual([['男孩，银发', '女孩，棕发'], [], []]);
+  });
+
+  it('脏项（非字符串 / 纯空白）被丢掉，其余保留原下标相对顺序', () => {
+    const raw = JSON.stringify({
+      images: [{ tag: 'a', charactersZh: ['男孩，银发', 42, '   ', null, '女孩，棕发'] }],
+    });
+    expect(extractCharactersZh(raw)).toEqual([['男孩，银发', '女孩，棕发']]);
+  });
+
+  it('charactersZh 不是数组 / 整段解析不了 → 空数组，不抛错', () => {
+    expect(extractCharactersZh(JSON.stringify({ images: [{ tag: 'a', charactersZh: '不是数组' }] }))).toEqual([[]]);
+    expect(extractCharactersZh('这不是 JSON')).toEqual([]);
+    expect(extractCharactersZh('')).toEqual([]);
+    expect(extractCharactersZh('{"changes":[]}')).toEqual([]);
+  });
+
+  it('剥掉 <thinking> 与代码块后再解析', () => {
+    const raw = '<thinking>想想</thinking>```json\n{"images":[{"charactersZh":["甲"]}]}\n```';
+    expect(extractCharactersZh(raw)).toEqual([['甲']]);
   });
 });

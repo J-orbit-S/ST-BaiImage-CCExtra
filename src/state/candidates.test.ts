@@ -405,6 +405,71 @@ describe('待生成（draft）', () => {
     expect(findCandidate(item.imageId)?.versions[0].tagZh).toBeUndefined();
   });
 
+  it('charactersZh 跟着 addAnalysis 进池子，按张对号', () => {
+    addAnalysis({ ...input(['tag-a', 'tag-b']), charactersZh: [['男孩，银发'], ['女孩，棕发']] });
+    const items = listCandidates();
+    expect(items[0].versions[0].charactersZh).toEqual(['男孩，银发']);
+    expect(items[1].versions[0].charactersZh).toEqual(['女孩，棕发']);
+  });
+
+  it('charactersZh 空数组 / 全空白项：版本上不挂这个字段', () => {
+    addAnalysis({ ...input(['tag-a']), charactersZh: [['  ']] });
+    expect(listCandidates()[0].versions[0].charactersZh).toBeUndefined();
+  });
+
+  it('编辑 Base 不清 charactersZh：角色分项没被手改，对照仍然有效', () => {
+    addAnalysis({
+      ...input(['1girl, tag-a']),
+      tagZh: ['中文甲'],
+      charactersZh: [['男孩，银发']],
+    });
+    const item = listCandidates()[0];
+    editCandidateTag(item.imageId, '1girl, edited');
+    const version = findCandidate(item.imageId)?.versions[0];
+    expect(version?.tagZh).toBeUndefined();
+    expect(version?.charactersZh).toEqual(['男孩，银发']);
+  });
+
+  it('addCandidateVersion：charactersZh 挂在最新版本上', () => {
+    addAnalysis({ ...input(['1girl, tag-a']) });
+    const item = listCandidates()[0];
+    addCandidateVersion(item.imageId, image('1girl, v2'), '中文二', ['男孩，黑发']);
+    const version = findCandidate(item.imageId)?.versions[1];
+    expect(version?.tagZh).toBe('中文二');
+    expect(version?.charactersZh).toEqual(['男孩，黑发']);
+  });
+
+  it('归一化：charactersZh 里的非字符串 / 空白项被滤掉，全空则不挂字段', () => {
+    const base = {
+      imageId: 'z:0',
+      planId: 'z',
+      chatId: 'chat-1',
+      floor: 1,
+      swipeId: 0,
+      segments: [{ segmentId: 's1', text: 'x', before: '', after: '', startLine: 0, endLine: 0 }],
+      index: 0,
+      versions: [
+        {
+          image: { position: 'P1', sourceLine: 0, tag: 'tag-a', nl: '', negative: '', characters: [], size: 'portrait' },
+          changes: [],
+          charactersZh: ['男孩，银发', 42, '   '],
+          createdAt: 1,
+        },
+      ],
+      activeVersion: 0,
+      status: 'pending',
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const kept = normalizeStore({ v: 1, items: [base] });
+    expect(kept.items[0].versions[0].charactersZh).toEqual(['男孩，银发']);
+    const empty = normalizeStore({
+      v: 1,
+      items: [{ ...base, versions: [{ ...base.versions[0], charactersZh: [42, null] }] }],
+    });
+    expect(empty.items[0].versions[0].charactersZh).toBeUndefined();
+  });
+
   it('归一化双向收敛：draft 没版本要留、draft 有版本要翻回 pending', () => {
     const base = {
       imageId: 'a:0',

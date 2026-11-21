@@ -290,7 +290,7 @@ vendored 文件里写的是 `import { ... } from '@/autoTag/clean'`。若把文�
 
 ---
 
-## 6. 踩过的 21 个坑
+## 6. 踩过的 22 个坑
 
 按「当时有多难发现」排序，不按时间。每一条都写清**现在由谁防住**，因为人记不住，机制能记住。
 
@@ -318,6 +318,7 @@ vendored 文件里写的是 `import { ... } from '@/autoTag/clean'`。若把文�
 | 19 | 确认时想复用捕获快照，永远失败 | `planSelection` 第一行是「正文指纹不符即 stale」，而确认发生在几分钟后，正文多半已经变过 | 走 `relocatePlan`：按锚点文本 + 前后 200 字重新定位，再拿当前正文造计划 | `confirm.test.ts` 的「上面多了一段也能插对位置」用例 |
 | 20 | **同一件事判两次，数据源还不同**：确认式下确认完不出图 | `commit.ts` 凭 confirmTag 说「去出图」，`autoGenerateSlots` 又查 prefs 说「开关关着不干」。全自动模式下两处判断恰好一致（都 true），bug 被完全掩盖——只有 autoGenerate=false + confirmTag=true 这个新组合才暴露 | 守卫只留一处（调用方）；`autoGenerateSlots` 删掉内层检查 | `confirm.test.ts` 的「确认才写正文，写完按确认即出图点卡片」+ autoGenerate 测试更新 |
 | 21 | 模型返回的 `characters` 数据一直在，候选卡片却只画 `tag` 一行 | 渲染只画了 Base；「先看后插」只看到一半，确认成了盲点 | 卡片补「角色: 名」分项（只读）；有 new 建档但无分项给软提示 | panel.test.ts 的「候选卡片显示角色分项」用例 |
+| 22 | **手机上划线永远不出气泡**（桌面全绿） | 触屏划线靠长按 + 手柄拖动，**从头到尾没有 mouseup**；只听 mouseup 的桌面假设被当成普适假设 | 补 `selectionchange` 监听：选区稳定 350ms 才落定；hide 后设抑制位防残留选区复显；触屏按钮放大 ≥36px | 触屏无法进单测，`trigger:bound` 诊断带 coarsePointer；真机验收 |
 
 还有一条不算坑但值得记：**`settle()` 挂在 document 的 mouseup 上，用户正常点按钮也会走到捕获逻辑**，
 于是每次「没选东西」都写一条诊断日志，开着 devtools 会刷屏。改成只在「确实划了东西但没通过校验」时记。
@@ -413,6 +414,32 @@ B 段交回卡片，就必然用当前方案。要真正实现自选方案，只
 ## 10. 变更日志
 
 > 以后每次发版在这里加一节。只写「用户能感知的变化 + 一致性状态」，不写重构细节。
+
+### v0.2.3 — 2026-11-21（角色分项中文对照 + 手机触屏划线）
+
+**需求**（用户实测 v0.2.2 后的两条反馈）：
+
+1. 角色库进候选了，但**角色分项没有中文翻译**——只翻 Base 不够，分项才是「这张画的是谁」的关键；
+2. **手机上划线不出操作气泡**——选完没有任何按钮浮出来。
+
+**决策**：
+
+- `charactersZh`：与该图 `characters[]` 同下标的中文对照，同一次副 API 顺手带出
+  （taskNote 追加一条要求，L1 例外仍 2 条）。挂在 version 上、编辑 Base 不清它——
+  被手改的是 Base，分项对照没失效。脏项宁缺毋错。
+- 触屏的根因：**长按划线从头到尾没有 mouseup**。修法不是去摸 touch 事件
+  （手柄拖动时序因机型而异），而是补一条通用事实——`selectionchange`：
+  选区非空且稳定 350ms 才浮出，拖动手柄的连发事件被去抖挡住；hide 后设抑制位，
+  防止残留选区把气泡顶回来。触屏下按钮放大到 ≥36px 命中区。
+- 桌面路径不动：mouseup / keyup 仍是最快路径，selectionchange 只是补充。
+
+**改动**：`autoTag/tagZh.ts`（+`extractCharactersZh`）、`state/candidates.ts`
+（version 加 `charactersZh` + 归一化）、`runner/analysis.ts` / `batch.ts` / `commit.ts` /
+`runSelection.ts`（穿链路）、`ui/panel.ts`（分项下挂中文）、`ui/trigger.ts`（selectionchange + 触屏尺寸）。
+
+**验证**：tsc 0 error｜37 文件 / 594 tests（+11）｜verify:upstream 全 MATCH。
+
+---
 
 ### v0.2.2 — 2026-11-21（待生成池 + 一键全生成 + 中文对照 + 双 bug 修复）
 

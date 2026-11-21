@@ -87,9 +87,17 @@ interface Harness {
 
 let chatSeq = 0;
 
-function reply(tag = '1girl, doorway, dim light', tagZh?: string): string {
+function reply(tag = '1girl, doorway, dim light', tagZh?: string, charactersZh?: string[]): string {
   return JSON.stringify({
-    images: [{ position: 'P1', tag, ...(tagZh ? { tagZh } : {}), size: 'portrait' }],
+    images: [
+      {
+        position: 'P1',
+        tag,
+        ...(tagZh ? { tagZh } : {}),
+        ...(charactersZh ? { charactersZh } : {}),
+        size: 'portrait',
+      },
+    ],
     changes: [
       {
         name: '小雪',
@@ -444,6 +452,19 @@ describe('中文对照（tagZh）', () => {
     expect(items[0].versions[0].tagZh).toBe('少女，门口，昏暗的灯光');
     // 中文只在候选里：正文里绝不能出现（它是「只给人看」的字段）
     expect(String(harness.message.mes)).not.toContain('少女，门口');
+  });
+
+  it('角色分项的中文对照（charactersZh）也进池子，按版本走', async () => {
+    const harness = install({
+      replies: [reply('1girl, doorway', '少女，门口', ['男孩，银发，红瞳'])],
+    });
+    const result = await runSelection(captureOf(MES, 1));
+    expect(result.status).toBe('pending');
+
+    const item = normalizeStore((harness.context.chatMetadata as AnyRecord)[CANDIDATES_KEY]).items[0];
+    expect(item.versions[0].charactersZh).toEqual(['男孩，银发，红瞳']);
+    // 同样只给人看，正文里绝不能出现
+    expect(String(harness.message.mes)).not.toContain('男孩，银发');
   });
 
   it('重 Roll：新版本带新中文，旧版本的对照保持原样', async () => {

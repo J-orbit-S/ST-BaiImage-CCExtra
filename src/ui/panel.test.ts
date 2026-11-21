@@ -567,4 +567,33 @@ describe('待生成区域', () => {
     expect(textsIn(shadow, '角色: 陆子慕')).toHaveLength(1);
     expect(textsIn(shadow, 'girl, brown hair')).toHaveLength(1);
   });
+
+  it('候选卡片给角色分项挂中文对照（charactersZh 与 characters 同下标）', async () => {
+    const withChars = candidate({
+      versions: [
+        {
+          image: {
+            position: 'P1',
+            sourceLine: 0,
+            tag: '1boy, 1girl, embrace',
+            nl: '',
+            negative: '',
+            characters: [
+              { name: '叶均', tag: 'boy, handsome, silver hair' },
+              { name: '陆子慕', tag: 'girl, brown hair' },
+            ],
+            size: 'portrait',
+          },
+          changes: [],
+          charactersZh: ['男孩，英俊，银发'],
+          createdAt: 1,
+        },
+      ],
+    });
+    const { shadow } = install({ candidates: [withChars] });
+    await openPanel();
+
+    // 第 0 个角色有对照；第 1 个没有（缺项安全降级，不串位）
+    expect(textsIn(shadow, '男孩，英俊，银发')).toHaveLength(1);
+  });
 });

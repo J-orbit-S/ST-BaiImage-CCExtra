@@ -21,6 +21,11 @@
  *
  * 定位用 `range.getBoundingClientRect()` 的右下角，钳进视口；用 fixed 定位，
  * 这样不依赖任何 ST 布局容器（ST 改版不会把我们挤到页面外）。
+ *
+ * 触屏（v0.2.3）：手机上划线靠长按 + 手柄拖动，**从头到尾没有 mouseup**——
+ * 只听 mouseup 的版本在手机上永远不出气泡。所以补一条 `selectionchange` 监听：
+ * 选区稳定（去抖 350ms 没再变）且非空才落定。抑制位（`suppressed`）保证
+ * 「点过按钮 / 手动收起后」残留的选区不会把气泡又顶回来。
  */
 
 import { captureSelection, describeCapture, type SelectionCapture } from '@/selection/capture';
@@ -50,19 +55,41 @@ let cancelling = false;
 let runningFloor: number | null = null;
 let bound = false;
 
+/** 选区稳定判定：手机拖动选区手柄时 selectionchange 会连发，停 350ms 才算划完。 */
+const SETTLE_DELAY = 350;
+let settleTimer: number | null = null;
+/**
+ * 抑制位：hide() 时选区往往还在（手机上点按钮不清选区）。
+ * 不压住的话，下一次 selectionchange（比如其他插件动了 DOM）会把气泡又顶回来。
+ * 选区一塌陷（用户重新划线）就解除。
+ */
+let suppressed = false;
+
 /** 三套颜色：正常 / 待生成（轻一点，不抢主按钮）/ 取消（红，明确会中止任务）。 */
 const BASE_BG = 'rgba(28,36,44,.94)';
 const DRAFT_BG = 'rgba(56,72,88,.94)';
 const CANCEL_BG = 'rgba(180,42,46,.95)';
 
+/**
+ * 触屏设备上 12px 小药丸按不中（Apple HIG / Android 都建议 ≥44px 命中区）。
+ * 粗指针环境放大按钮，鼠标环境保持原样。
+ */
+const COARSE_POINTER =
+  typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    ? window.matchMedia('(pointer: coarse)').matches
+    : false;
+
 function stylePill(button: HTMLButtonElement, background: string): void {
   Object.assign(button.style, {
-    padding: '4px 10px',
+    padding: COARSE_POINTER ? '8px 14px' : '4px 10px',
+    minHeight: COARSE_POINTER ? '36px' : '',
     border: '1px solid rgba(255,255,255,.18)',
     borderRadius: '999px',
     background,
     color: '#fff',
-    font: '500 12px/1.6 system-ui,"PingFang SC","Microsoft YaHei",sans-serif',
+    font: COARSE_POINTER
+      ? '500 14px/1.4 system-ui,"PingFang SC","Microsoft YaHei",sans-serif'
+      : '500 12px/1.6 system-ui,"PingFang SC","Microsoft YaHei",sans-serif',
     cursor: 'pointer',
     whiteSpace: 'nowrap',
   } as Partial<CSSStyleDeclaration>);
@@ -93,7 +120,7 @@ function ensureToolbar(): HTMLDivElement {
     zIndex: '2147483000',
     display: 'none',
     alignItems: 'center',
-    gap: '4px',
+    gap: COARSE_POINTER ? '8px' : '4px',
     // 容器本身不可见也不吃事件：否则它会在选区旁边留一块"透明墙"
     background: 'transparent',
   } as Partial<CSSStyleDeclaration>);
@@ -128,6 +155,9 @@ function showAt(rect: DOMRect): void {
 function hide(): void {
   pending = null;
   if (toolbar) toolbar.style.display = 'none';
+  // 选区还在的话压住 selectionchange 的自动复显；塌陷后自动解除（见 suppressed 注释）
+  const selection = typeof document !== 'undefined' ? document.getSelection?.() ?? window.getSelection() : null;
+  suppressed = Boolean(selection && !selection.isCollapsed);
 }
 
 /**
@@ -242,6 +272,30 @@ function settle(): void {
   showAt(rect);
 }
 
+/** 选区稳定后落定；手机拖动手柄期间连发的 selectionchange 靠去抖挡住。 */
+function scheduleSettle(): void {
+  if (settleTimer !== null) window.clearTimeout(settleTimer);
+  settleTimer = window.setTimeout(() => {
+    settleTimer = null;
+    settle();
+  }, SETTLE_DELAY);
+}
+
+function onSelectionChange(): void {
+  const selection = typeof document !== 'undefined' ? document.getSelection?.() ?? window.getSelection() : null;
+  if (!selection || selection.isCollapsed) {
+    // 划到一半塌陷（误触 / 重新开始）：停掉在途判定，并解除抑制
+    if (settleTimer !== null) {
+      window.clearTimeout(settleTimer);
+      settleTimer = null;
+    }
+    suppressed = false;
+    return;
+  }
+  if (suppressed) return;
+  scheduleSettle();
+}
+
 /** 选区之外的地方按下/滚动，就该收起来 —— 否则按钮会飘在屏幕上跟着用户走。 */
 function onDocumentMouseDown(event: MouseEvent): void {
   if (toolbar && event.target instanceof Node && toolbar.contains(event.target)) return;
@@ -265,7 +319,11 @@ export function bindSelectionTrigger(options: TriggerOptions = {}): () => void {
   if (bound) return () => {};
   bound = true;
 
-  const onSettle = () => settle();
+  // mouseup / keyup 是桌面路径；路径上先解除抑制——用户主动划了新选区，必须照常浮出
+  const onSettle = () => {
+    suppressed = false;
+    settle();
+  };
   const onKeyDown = (event: KeyboardEvent) => {
     if (event.key !== 'Escape') return;
     // 忙的时候 Esc 等于「取消」：按钮此刻就是取消键，语义一致。
@@ -282,18 +340,25 @@ export function bindSelectionTrigger(options: TriggerOptions = {}): () => void {
 
   doc.addEventListener('mouseup', onSettle, true);
   doc.addEventListener('keyup', onSettle, true);
+  doc.addEventListener('selectionchange', onSelectionChange, true);
   doc.addEventListener('mousedown', onDocumentMouseDown, true);
   doc.addEventListener('keydown', onKeyDown, true);
   win.addEventListener('scroll', onScroll, true);
 
-  diagnostic('trigger:bound', { toolbarId: TOOLBAR_ID });
+  diagnostic('trigger:bound', { toolbarId: TOOLBAR_ID, coarsePointer: COARSE_POINTER });
 
   return () => {
     doc.removeEventListener('mouseup', onSettle, true);
     doc.removeEventListener('keyup', onSettle, true);
+    doc.removeEventListener('selectionchange', onSelectionChange, true);
     doc.removeEventListener('mousedown', onDocumentMouseDown, true);
     doc.removeEventListener('keydown', onKeyDown, true);
     win.removeEventListener('scroll', onScroll, true);
+    if (settleTimer !== null) {
+      window.clearTimeout(settleTimer);
+      settleTimer = null;
+    }
+    suppressed = false;
     toolbar?.remove();
     toolbar = null;
     generateButton = null;

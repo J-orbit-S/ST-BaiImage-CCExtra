@@ -55,6 +55,7 @@ export async function runSelection(capture: SelectionCapture, opts: RunOptions =
       images: analysis.images,
       changes: analysis.changes,
       tagZh: analysis.tagZh,
+      charactersZh: analysis.charactersZh,
     });
     diagnostic('runSelection:pending', { floor: analysis.floor, added });
     notify('info', `已生成 ${added} 个候选画面：在面板里确认后才会写进正文`);

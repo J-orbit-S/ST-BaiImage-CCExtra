@@ -892,3 +892,40 @@ npm run build       dist/index.js 221.1 KB（gzip 83.1 KB）
 
 **L1 例外从 1 条变成 2 条**：`source`（切片）+ `taskBlock`（tagZh 要求）。后者可关；
 关掉后回到 1 条。协议、解析、写回、rebase 口径不变。
+
+### 13.12 v0.2.3：角色分项中文对照 + 手机触屏划线（2026-11-21）
+
+#### 角色分项也翻（`charactersZh`）
+
+v0.2.2 的 tagZh 刻意「只翻 Base」（当时判断：分项不可编辑，翻它收益小）。用户实测反馈：
+**角色分项恰恰是判断「这张画的是谁」的关键，没有中文等于白看一半**。v0.2.3 起范围放宽：
+
+- `TAG_ZH_TASK_NOTE` 追加第 2 条要求：每张图额外给 `"charactersZh"`——**与 `characters[]` 等长的字符串数组**，
+  第 i 项是对 `characters[i].tag` 的逐项直译。通道仍然是 `taskNote`，L1 例外仍为 2 条不变。
+- 提取函数 `extractCharactersZh(raw)`：与 `extractTagZh` 同一套「剥 thinking / 代码块 → 取字段」，
+  脏项（非字符串 / 纯空白）直接丢——宁缺毋错。任何失败静默降级，不影响分析。
+- 存储：`CandidateVersion.charactersZh?: string[]`（与该图 `image.characters[]` 同下标）。
+  走 addAnalysis / fillDraft / addCandidateVersion 全链路；归一化滤脏项。
+- **编辑 Base 不清 `charactersZh`**：被手改的是 Base，分项对照仍然有效（与 tagZh 的清空规则区分开）。
+- 渲染：卡片上每个「角色: 名」+ 英文 tag 下面挂一行中文（缺项安全降级，不串位）。
+
+#### 手机触屏划线（`ui/trigger.ts`）
+
+手机上划线靠**长按 + 手柄拖动**，从头到尾没有 `mouseup`——只听 mouseup 的版本在手机上永远不出气泡。修法：
+
+- **补 `selectionchange` 监听**：选区非空且**稳定 350ms**（去抖）才落定浮出。拖动手柄期间连发的事件被去抖挡住。
+- **抑制位 `suppressed`**：hide() 时选区往往还在（手机点按钮不清选区），不压住的话残留选区会把气泡顶回来；
+  选区一塌陷（用户重新划线）自动解除。mouseup / keyup 路径先解除抑制再 settle（主动划新选区必须照常浮出）。
+- **触屏按钮放大**：`(pointer: coarse)` 命中时 padding 8px 14px / 字号 14px / min-height 36px / 间距 8px
+  （命中区 ≥36px，接近两大平台的最低建议）。鼠标环境保持原样。
+- 桌面行为不变：mouseup / keyup 仍是最快路径，selectionchange 只是补充（settle 幂等，重复落定无害）。
+
+#### 验收
+
+```
+npm run typecheck   0 error
+npm test            37 文件 / 594 tests（新增 11：5 tagZh/charactersZh + 5 候选池 + 1 面板分项对照）
+verify:upstream     40 文件 SHA256 + 3 片段 + 10 常量全 MATCH（柏宝绘零改动）
+```
+
+

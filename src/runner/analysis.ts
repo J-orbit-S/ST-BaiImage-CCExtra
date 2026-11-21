@@ -27,7 +27,7 @@ import {
   type ImageInsertion,
   type ImagePlan,
 } from '@/autoTag/protocol';
-import { extractTagZh, TAG_ZH_TASK_NOTE } from '@/autoTag/tagZh';
+import { extractCharactersZh, extractTagZh, TAG_ZH_TASK_NOTE } from '@/autoTag/tagZh';
 import { hashText } from '@/selection/hash';
 import { relocatePlan } from '@/selection/relocate';
 import { planSelection, type SelectionPlan } from '@/selection/segmentPlan';
@@ -58,6 +58,8 @@ export interface SelectionAnalysis {
   changes: CharChange[];
   /** Base tag 的中文对照，与 `images` 同下标；空串 = 模型没给。只给人看，绝不写回。 */
   tagZh: string[];
+  /** 角色分项的中文对照，与 `images` 同下标（每项再与该图 characters[] 同下标）。 */
+  charactersZh: string[][];
   profile: AutoTagProfile;
   /** 锚点快照：确认时可以拿它重新定位（正文变了也不至于插错）。 */
   segment: SegmentAnchor;
@@ -178,7 +180,7 @@ async function requestPlan(params: {
   taskNote: string;
   label: string;
   signal?: AbortSignal;
-}): Promise<{ ok: true; plan: ImagePlan; tagZh: string[] } | { ok: false; result: RunResult }> {
+}): Promise<{ ok: true; plan: ImagePlan; tagZh: string[]; charactersZh: string[][] } | { ok: false; result: RunResult }> {
   const { env, prepared, promptOptions, taskNote, label, signal } = params;
   const { context, floor, profile } = env;
 
@@ -198,12 +200,13 @@ async function requestPlan(params: {
   const retries = Math.max(0, Math.floor(Number(settings.autoTag.retryCount) || 0));
   let imagePlan: ImagePlan | null = null;
   let tagZh: string[] = [];
+  let charactersZh: string[][] = [];
   let lastError = '';
 
   for (let attempt = 0; attempt <= retries && !imagePlan; attempt += 1) {
     if (signal?.aborted) return { ok: false, result: result('aborted', '已取消') };
     try {
-      const parsed: { plan: ImagePlan | null; tagZh: string[] } = { plan: null, tagZh: [] };
+      const parsed: { plan: ImagePlan | null; tagZh: string[]; charactersZh: string[][] } = { plan: null, tagZh: [], charactersZh: [] };
       const validate = (raw: string) => {
         // 漫画不受张数上下限约束（页数由 AI 按内容定），只要求至少一页
         const candidate = profile.comic
@@ -218,7 +221,11 @@ async function requestPlan(params: {
           throw new Error('NAI 4.5/V5 建档必须附带 nl 外貌描述');
         }
         parsed.plan = candidate;
-        parsed.tagZh = profile.comic ? [] : extractTagZh(raw);
+        // 中文对照只在插画方案下取（漫画没有 tag 键）；任何脏值都安全降级成空
+        if (!profile.comic) {
+          parsed.tagZh = extractTagZh(raw);
+          parsed.charactersZh = extractCharactersZh(raw);
+        }
       };
       const source = retries > 0 ? `${label}(第 ${floor} 楼 · 第 ${attempt + 1} 次)` : `${label}(第 ${floor} 楼)`;
 
@@ -230,6 +237,7 @@ async function requestPlan(params: {
       if (signal?.aborted) return { ok: false, result: result('aborted', '已取消') };
       imagePlan = parsed.plan;
       tagZh = parsed.plan ? parsed.tagZh : [];
+      charactersZh = parsed.plan ? parsed.charactersZh : [];
     } catch (error) {
       if (signal?.aborted) return { ok: false, result: result('aborted', '已取消') };
       lastError = error instanceof Error ? error.message : String(error);
@@ -242,7 +250,7 @@ async function requestPlan(params: {
     notify('error', `${lastError}${retries > 0 ? `（已自动重试 ${retries} 次）` : ''}`);
     return { ok: false, result: result('failed', lastError, { reason: 'retries-exhausted' }) };
   }
-  return { ok: true, plan: imagePlan, tagZh };
+  return { ok: true, plan: imagePlan, tagZh, charactersZh };
 }
 
 /** 后处理 + changes → ops。返回过滤后的 ops（锁定角色丢弃）与「库外角色」清单。 */
@@ -364,6 +372,7 @@ export async function analyzeSelection(capture: SelectionCapture, opts: AnalyzeO
         images: imagePlan.images,
         changes: imagePlan.changes,
         tagZh: requested.tagZh,
+        charactersZh: imagePlan.images.map((_, index) => requested.charactersZh[index] ?? []),
         profile: env.profile,
         segment: buildSegmentAnchor(env.chatId, selectionPlan.capture, env.rawSource),
       },
@@ -395,6 +404,8 @@ export interface BatchPayload {
   changes: CharChange[];
   /** 与 `images` 同下标的中文对照。 */
   tagZh: string[];
+  /** 该段那张图的分项中文对照，与其 characters[] 同下标。 */
+  charactersZh: string[];
 }
 
 export interface BatchAnalysis {
@@ -546,7 +557,7 @@ export async function analyzeBatch(floor: number, swipeId: number, items: BatchI
 
     const byOwner = new Map<string, BatchPayload>();
     for (const item of items) {
-      byOwner.set(item.imageId, { imageId: item.imageId, images: [], changes: [], tagZh: [] });
+      byOwner.set(item.imageId, { imageId: item.imageId, images: [], changes: [], tagZh: [], charactersZh: [] });
     }
     let droppedImages = 0;
     imagePlan.images.forEach((image, index) => {
@@ -564,6 +575,7 @@ export async function analyzeBatch(floor: number, swipeId: number, items: BatchI
       payload.images.push({ ...image, sourceLine: line.sliceLine });
       const zh = requested.tagZh[index];
       payload.tagZh.push(zh ?? '');
+      payload.charactersZh = requested.charactersZh[index] ?? [];
     });
     for (const change of imagePlan.changes) {
       const line = composed[change.sourceLine];

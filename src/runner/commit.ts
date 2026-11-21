@@ -314,7 +314,7 @@ export async function rerollCandidate(imageId: string, opts: CandidateCommitOpti
   if (!image) return failure(floor, 'no-image', '模型这次没有给出画面，候选保持原样');
 
   // 中文对照跟着新版本走：留在外层的话，重 Roll 后卡片上的中文会停在上一版
-  if (!addCandidateVersion(imageId, image, outcome.analysis.tagZh[0])) {
+  if (!addCandidateVersion(imageId, image, outcome.analysis.tagZh[0], outcome.analysis.charactersZh[0])) {
     return failure(floor, 'candidate-missing', '这条候选已经不在了，无法保存重 Roll 结果');
   }
   diagnostic('candidate:reroll', { floor, imageId, tagChars: image.tag.length });

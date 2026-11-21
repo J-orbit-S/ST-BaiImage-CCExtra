@@ -609,7 +609,8 @@ function buildCard(item: ImageCandidate, ordinal: number): HTMLElement {
   }
 
   // 角色分项：候选阶段必须能看见，否则「先看后插」只看到一半（v0.2.2 修）
-  for (const character of current.image.characters) {
+  // v0.2.3 起每个角色下面也挂中文对照（charactersZh 与 characters[] 同下标）
+  current.image.characters.forEach((character, index) => {
     const name = el('span');
     name.textContent = `角色: ${character.name}`;
     Object.assign(name.style, {
@@ -618,7 +619,9 @@ function buildCard(item: ImageCandidate, ordinal: number): HTMLElement {
       marginTop: '2px',
     } as Partial<CSSStyleDeclaration>);
     card.append(name, tagLine(character.tag, { mono: true }));
-  }
+    const zh = current.charactersZh?.[index]?.trim();
+    if (zh) card.append(tagLine(zh, { soft: true }));
+  });
   if (!current.image.characters.length && current.changes.some(change => change.field === 'new')) {
     card.append(tagLine('这一版没有角色分项（本次建档的角色不在画面里，重 Roll 可能更好）。', { soft: true }));
   }

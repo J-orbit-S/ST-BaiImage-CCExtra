@@ -38,10 +38,12 @@ function isConfirmMode(): boolean {
 function versionOf(payload: BatchPayload): CandidateVersion {
   const image = payload.images[0];
   const zh = payload.tagZh[0]?.trim();
+  const charZh = payload.charactersZh?.filter(item => item.trim());
   return {
     image,
     changes: payload.changes,
     ...(zh ? { tagZh: zh } : {}),
+    ...(charZh?.length ? { charactersZh: charZh } : {}),
     createdAt: Date.now(),
   };
 }
@@ -104,6 +106,7 @@ export async function generateDraft(imageId: string, opts: { signal?: AbortSigna
     images: [image],
     changes: outcome.analysis.changes,
     tagZh: [zh ?? ''],
+    charactersZh: outcome.analysis.charactersZh[0] ?? [],
   };
   diagnostic('draft:generate', { floor: item.floor, imageId, tagChars: image.tag.length });
   return settle(imageId, payload, opts);
