@@ -26,6 +26,11 @@
  * 只听 mouseup 的版本在手机上永远不出气泡。所以补一条 `selectionchange` 监听：
  * 选区稳定（去抖 350ms 没再变）且非空才落定。抑制位（`suppressed`）保证
  * 「点过按钮 / 手动收起后」残留的选区不会把气泡又顶回来。
+ *
+ * 触屏（v0.2.4）：iOS/Android 的原生选择菜单（拷贝/翻译那排）会**盖住**浮出按钮。
+ * 它只依附于真实选区存在，而按钮用的本来就是快照 —— 落定时 `removeAllRanges()`
+ * 菜单就必然消失；视觉上用 Custom Highlight API 补一层假高亮（Safari 17.4+），
+ * 不支持的浏览器只是没有高亮，功能不受影响。桌面保留原生选区不动。
  */
 
 import { captureSelection, describeCapture, type SelectionCapture } from '@/selection/capture';
@@ -64,6 +69,52 @@ let settleTimer: number | null = null;
  * 选区一塌陷（用户重新划线）就解除。
  */
 let suppressed = false;
+
+/**
+ * 触屏上的原生菜单对策（v0.2.4）：iOS/Android 的「拷贝 / 翻译」那排系统菜单只依附于
+ * **真实选区**存在，而三个按钮用的本来就是 settle 时算好的快照，不依赖选区活着。
+ * 所以粗指针环境下落定时把真实选区清掉（removeAllRanges），系统菜单必然消失；
+ * 视觉上用 Custom Highlight API 补一层假高亮，用户不会丢「选了哪里」。
+ * 桌面不动：右键菜单不盖气泡，保留原生选区还能顺手复制。
+ */
+const HIGHLIGHT_NAME = 'ccx-select';
+const HIGHLIGHT_STYLE_ID = 'ccx-highlight-style';
+
+function highlightSupported(): boolean {
+  const g = globalThis as unknown as Record<string, unknown>;
+  const css = g.CSS as { highlights?: Map<string, unknown> } | undefined;
+  return typeof g.Highlight === 'function' && typeof css?.highlights?.set === 'function';
+}
+
+function applyHighlight(range: Range): void {
+  if (!highlightSupported()) return;
+  try {
+    const css = (globalThis as unknown as { CSS: { highlights: Map<string, unknown> } }).CSS;
+    const HighlightCtor = (globalThis as unknown as { Highlight: new (ranges: Range[]) => unknown }).Highlight;
+    css.highlights.delete(HIGHLIGHT_NAME);
+    css.highlights.set(HIGHLIGHT_NAME, new HighlightCtor([range]));
+  } catch {
+    /* 高亮是锦上添花，任何失败都不影响功能 */
+  }
+}
+
+function clearHighlight(): void {
+  if (!highlightSupported()) return;
+  try {
+    ((globalThis as unknown as { CSS: { highlights: Map<string, unknown> } }).CSS.highlights).delete(HIGHLIGHT_NAME);
+  } catch {
+    /* 同上 */
+  }
+}
+
+/** 注入 ::highlight 的着色规则（幂等；不支持 Custom Highlight API 的浏览器规则不会被引用）。 */
+function ensureHighlightStyle(doc: Document): void {
+  if (doc.getElementById(HIGHLIGHT_STYLE_ID)) return;
+  const style = doc.createElement('style');
+  style.id = HIGHLIGHT_STYLE_ID;
+  style.textContent = `::highlight(${HIGHLIGHT_NAME}) { background-color: rgba(96,165,250,.35); }`;
+  (doc.head ?? doc.body).appendChild(style);
+}
 
 /** 三套颜色：正常 / 待生成（轻一点，不抢主按钮）/ 取消（红，明确会中止任务）。 */
 const BASE_BG = 'rgba(28,36,44,.94)';
@@ -113,6 +164,7 @@ function makeButton(text: string, background: string, onClick: () => void): HTML
 function ensureToolbar(): HTMLDivElement {
   if (toolbar && document.body.contains(toolbar)) return toolbar;
 
+  ensureHighlightStyle(document);
   const el = document.createElement('div');
   el.id = TOOLBAR_ID;
   Object.assign(el.style, {
@@ -154,6 +206,7 @@ function showAt(rect: DOMRect): void {
 
 function hide(): void {
   pending = null;
+  clearHighlight();
   if (toolbar) toolbar.style.display = 'none';
   // 选区还在的话压住 selectionchange 的自动复显；塌陷后自动解除（见 suppressed 注释）
   const selection = typeof document !== 'undefined' ? document.getSelection?.() ?? window.getSelection() : null;
@@ -266,9 +319,22 @@ function settle(): void {
     hide();
     return;
   }
-  const rect = selection.getRangeAt(0).getBoundingClientRect();
+  const range = selection.getRangeAt(0);
+  const rect = range.getBoundingClientRect();
   pending = outcome.capture;
   console.debug(describeCapture(outcome.capture));
+  if (COARSE_POINTER) {
+    // 快照已到手：清掉真实选区，系统菜单（拷贝/翻译）随之消失，气泡不再被盖住。
+    // 清不掉（老浏览器不配合）也不影响功能——只是菜单可能还压在上面。
+    try {
+      selection.removeAllRanges();
+    } catch {
+      /* 保留原样 */
+    }
+    applyHighlight(range.cloneRange());
+  } else {
+    clearHighlight();
+  }
   showAt(rect);
 }
 
@@ -359,6 +425,7 @@ export function bindSelectionTrigger(options: TriggerOptions = {}): () => void {
       settleTimer = null;
     }
     suppressed = false;
+    clearHighlight();
     toolbar?.remove();
     toolbar = null;
     generateButton = null;

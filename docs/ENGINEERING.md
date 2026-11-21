@@ -928,4 +928,27 @@ npm test            37 文件 / 594 tests（新增 11：5 tagZh/charactersZh + 5
 verify:upstream     40 文件 SHA256 + 3 片段 + 10 常量全 MATCH（柏宝绘零改动）
 ```
 
+### 13.13 v0.2.4：触屏原生菜单遮挡（2026-11-21）
+
+用户实测截图：iOS 长按划线后，系统自带的「拷贝 / 使用 Google 搜索 / Google 翻译」一排
+**压在浮出按钮上面**——气泡出来了但点不到。这不是时序问题，是**同屏争位**：
+
+- 系统菜单只依附于**真实选区**存在；而三个按钮用的本来就是 settle 时就地算好的快照
+  （`pending`），完全不依赖选区活着。
+- 所以粗指针环境下落定后 `selection.removeAllRanges()`：真实选区一没，系统菜单**必然**消失。
+  这比「猜菜单在哪、把气泡挪开」可靠——菜单位置随系统版本变，选区没了它不存在。
+- 视觉补偿：清掉真实选区后用户会丢「选了哪里」的提示。用 **Custom Highlight API**
+  （`CSS.highlights` + `::highlight(ccx-select)`，Safari 17.4+ / Chrome 105+）把快照时的
+  Range 标成半透明蓝。规则由 `ensureHighlightStyle` 注入一次；API 不存在的浏览器只是没高亮，
+  功能不受影响。高亮失败一律静默——它是锦上添花。
+- 桌面保留原生选区：右键菜单不盖气泡，选区还在还能顺手复制。
+- 代价：触屏上清选区后不能再拖手柄微调，要改就重新长按划一次。换来的是气泡永远可见可点。
+
+#### 验收
+
+```
+npm run typecheck   0 error
+npm test            37 文件 / 594 tests 全绿（无新增用例：removeAllRanges 与 highlights 无法在 jsdom 里仿真，靠真机验收）
+```
+
 
