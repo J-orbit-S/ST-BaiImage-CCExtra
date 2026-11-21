@@ -24,7 +24,7 @@
  * （拷贝/翻译）、其他插件的气泡都在那儿，谁挂上去都会互相盖。
  * 仍然用 fixed 定位 + 视口钳位，不依赖任何 ST 布局容器（ST 改版不会把我们挤到页面外）。
  *
- * 可见性模型（v0.2.6，照 book-excerpt 的成熟做法重写）：
+ * 可见性模型（v0.2.6 重写）：
  *
  *   **工具条的可见性是「当前选区」的纯函数**：选区非空且能捕获 → 显示；
  *   选区塌陷 → 收起；滚动 → 跟着选区重新锚定。没有任何「一次失败就永久哑火」的
@@ -71,8 +71,8 @@ let bound = false;
 
 /**
  * 选区稳定判定：手机拖动选区手柄时 selectionchange 会连发，停 120ms 才算划完。
- * v0.2.3 用 350ms 是为了「拖完再出」，实测太钝（真机上像失灵）；120ms 与
- * book-excerpt 同款，拖动中每次变化都重置计时，停手即出。
+ * v0.2.3 用 350ms 是为了「拖完再出」，实测太钝（真机上像失灵）；
+ * 120ms 拖动中每次变化都重置计时，停手即出。
  */
 const SETTLE_DELAY = 120;
 let settleTimer: number | null = null;
@@ -120,7 +120,7 @@ function stylePill(button: HTMLButtonElement, background: string): void {
 }
 
 /**
- * click 与 touchend 双绑（book-excerpt 同款）：触屏直接在 touchend 响应，
+ * click 与 touchend 双绑：触屏直接在 touchend 响应，
  * 不等浏览器合成 click（iOS 上慢且可能被系统菜单截走）；300ms 忙锁防止
  * touchend + 合成 click 双触发跑两遍。
  */
